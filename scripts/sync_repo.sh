@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Mirror one upstream repository into the mirror org.
 #
-# Usage: sync_repo.sh <upstream-clone-url> <mirror-name> [default-branch]
-#   e.g. sync_repo.sh https://github.com/CSOIreland/PxStat.git CSOIreland.PxStat master
+# Usage: sync_repo.sh <upstream-clone-url> <mirror-name> [default-branch] [tier]
+#   e.g. sync_repo.sh https://github.com/CSOIreland/PxStat.git CSOIreland.PxStat master core
 #
 # Requires: GH_TOKEN (contents:write, administration:write, workflows:write on
 # the target org), MIRROR_ORG, and the `gh` CLI. Idempotent: safe to re-run.
+#
+# tier is "core" (owned by a verified Irish public body) or "extended" (an
+# Irish public-service project owned by someone else - Linux Foundation Public
+# Health, a cross-border project, a vendor). Extended repos live in the same
+# org but are labelled so government ownership is never implied.
 #
 # Fidelity contract: git data is pushed verbatim. This script never rewrites
 # history, never injects files, and never edits repository contents.
@@ -15,6 +20,7 @@ set -uo pipefail
 UPSTREAM_URL="${1:?upstream clone url required}"
 MIRROR_NAME="${2:?mirror name required}"
 WANT_DEFAULT_BRANCH="${3:-}"
+TIER="${4:-core}"
 MIRROR_ORG="${MIRROR_ORG:?MIRROR_ORG required}"
 WORKDIR="${WORKDIR:-$(mktemp -d)}/${MIRROR_NAME}.git"
 
@@ -56,17 +62,40 @@ note "$BRANCH_COUNT branches, $TAG_COUNT tags"
 #    so the mirror is never mistaken for the canonical source. Issues, wiki and
 #    projects stay off: this is an archive, not a place to file bugs.
 # ---------------------------------------------------------------------------
+UPSTREAM_SLUG="${UPSTREAM_URL#https://github.com/}"; UPSTREAM_SLUG="${UPSTREAM_SLUG%.git}"
+
+if [ "$TIER" = "extended" ]; then
+  # Owned by a non-government body. The description carries the caveat because
+  # the upstream owner segment alone (covidgreen, derilinx, localgovdrupal) is
+  # not an explicit enough signal.
+  DESCRIPTION="Unofficial mirror of ${UPSTREAM_SLUG}. An Irish public-service project NOT owned by an Irish public body. Not affiliated with or endorsed by any Irish public body."
+  TOPICS="mirror,unofficial,not-government-owned"
+else
+  DESCRIPTION="Unofficial mirror of ${UPSTREAM_SLUG}. Not affiliated with or endorsed by any Irish public body."
+  TOPICS="mirror,unofficial"
+fi
+
 if ! gh repo view "${MIRROR_ORG}/${MIRROR_NAME}" >/dev/null 2>&1; then
-  UPSTREAM_SLUG="${UPSTREAM_URL#https://github.com/}"; UPSTREAM_SLUG="${UPSTREAM_SLUG%.git}"
-  note "creating ${MIRROR_ORG}/${MIRROR_NAME}"
+  note "creating ${MIRROR_ORG}/${MIRROR_NAME} (tier=$TIER)"
   gh repo create "${MIRROR_ORG}/${MIRROR_NAME}" --public \
-    --description "Unofficial mirror of ${UPSTREAM_SLUG}. Not affiliated with or endorsed by any Irish public body." \
+    --description "$DESCRIPTION" \
     --homepage "https://github.com/${UPSTREAM_SLUG}" \
     --disable-issues --disable-wiki >/dev/null || fail "repo creation failed"
   # Pace repo creation: the secondary rate limit is 80 content-generating
   # requests/minute and 500/hour.
   sleep 2
 fi
+
+# Topics are metadata, never contents - the fidelity contract is untouched.
+# Build the args as an array so each topic is a separate -f flag.
+TOPIC_ARGS=()
+for topic in ${TOPICS//,/ }; do
+  TOPIC_ARGS+=(-f "names[]=${topic}")
+done
+# Upstream org slug as a topic makes provenance filterable in the org listing.
+TOPIC_ARGS+=(-f "names[]=$(echo "${UPSTREAM_SLUG%%/*}" | tr '[:upper:]' '[:lower:]')")
+gh api -X PUT "/repos/${MIRROR_ORG}/${MIRROR_NAME}/topics" "${TOPIC_ARGS[@]}" \
+  >/dev/null 2>&1 || note "WARNING could not set topics"
 
 # ---------------------------------------------------------------------------
 # 4. Git LFS before the git push, so pointer files never dangle. Upstream LFS

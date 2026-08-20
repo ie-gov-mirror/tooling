@@ -9,18 +9,20 @@ source for every mirrored repository is its upstream, linked from each mirror's
 homepage field.
 
 > **Status: nothing has been mirrored yet.** This repo currently holds the
-> plan, the tooling and the inventory. See
-> [`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md), which has ten open
-> questions to settle before backfill.
+> plan, the tooling and the inventory. All fourteen design decisions are
+> settled — see [`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md). What
+> remains before backfill is Phase 0: org settings and the access token.
 
 ## Scope
 
 | Tier | Repos | Size | Mirrored |
 |---|---:|---:|---|
-| core | 191 | 11.51 GiB | yes, to `ie-gov-mirror` |
-| extended | 18 | 44.5 MiB | yes, to a separate org so ownership is never implied |
-| candidate | 18 | 892 MiB | **no** — ownership unverified |
+| core | 191 | 11.51 GiB | yes |
+| extended | 18 | 44.5 MiB | yes, labelled `not-government-owned` |
+| candidate | 18 | 892 MiB | **no** — ownership unverified twice |
 | adjacent | 1 | 58 MiB | no — independent derivative, linked only |
+
+**209 repositories, 11.56 GiB, 12 namespaces.**
 
 Core namespaces: [IrishMarineInstitute](https://github.com/IrishMarineInstitute)
 (100), [CSOIreland](https://github.com/CSOIreland) (35),
@@ -47,11 +49,14 @@ recovers the upstream exactly.
 
 ```
 manifest/    the authoritative inventory and provenance record
-scripts/     enumerate.py, sync_repo.sh, tombstone.py
+scripts/     enumerate.py, sync_repo.sh, tombstone.py, deleted_repo_report.py
 .github/     enumerate (daily), sync (weekly), backfill (manual)
-POLICY.md    takedown, GDPR erasure, secrets, tombstones
-docs/        execution plan and the source research snapshot
+POLICY.md    removal requests, GDPR erasure, secrets, tombstones
+docs/        execution plan, DELETED.md, and the source research snapshot
 ```
+
+Contact for removal and data-erasure requests: **ie-gov-mirror@googlegroups.com**
+(see [`POLICY.md`](POLICY.md)).
 
 `manifest/*.csv` **is** the provenance record — `git log manifest/core.csv` is
 the full audit trail of `first_seen`, `last_seen` and `last_synced`. Note that
@@ -60,17 +65,20 @@ uk-gov-mirror's 26,416 repos), so the manifest is the inventory, not search.
 
 ## Running it
 
-Requires a GitHub App installed on the org with **Administration: write**,
-**Contents: write**, **Workflows: write**, **Metadata: read** — stored as the
-`MIRROR_APP_ID` org variable and `MIRROR_APP_PRIVATE_KEY` org secret.
+Requires a fine-grained PAT stored as the `MIRROR_TOKEN` org secret, with
+**Administration: write** (create repos, set default branch and topics,
+archive tombstones), **Contents: write**, **Workflows: write** (mandatory —
+pushes touching `.github/workflows/*` are rejected without it) and
+**Metadata: read**. Migrating to an org-owned GitHub App is planned after
+backfill.
 
 ```bash
 # What has drifted from the manifest?
 GH_TOKEN=... python scripts/enumerate.py --report
 
-# Mirror one repository
+# Mirror one repository (tier controls labelling: core | extended)
 GH_TOKEN=... MIRROR_ORG=ie-gov-mirror \
-  scripts/sync_repo.sh https://github.com/CSOIreland/PxStat.git CSOIreland.PxStat master
+  scripts/sync_repo.sh https://github.com/CSOIreland/PxStat.git CSOIreland.PxStat master core
 
 # Check for upstreams that have disappeared (never deletes anything)
 GH_TOKEN=... python scripts/tombstone.py --check-all --dry-run
@@ -84,9 +92,16 @@ first.
 - **Actions must be disabled org-wide**, allowlisting only this repo. Mirrored
   repositories contain their own `.github/workflows/*` with `on: push`
   triggers, which would otherwise execute in the mirror org on every sync.
-- **Secret scanning push protection must be off** for the mirror org, or the
-  backfill will be blocked the first time upstream history contains something
-  matching a secret pattern. Keep *alerts* on. See [`POLICY.md`](POLICY.md).
+- **Secret scanning must be off** for the mirror org — push protection would
+  block the backfill on the first secret pattern in upstream history. Alerts
+  are off too, so there is no proactive signal for credentials in mirrored
+  history; [`POLICY.md`](POLICY.md) commits only to a reactive process.
+
+## Repositories that vanished upstream
+
+[`docs/DELETED.md`](docs/DELETED.md) lists tracked repositories that no longer
+exist upstream but are still readable here. It is generated from
+`manifest/tombstones.csv`, so it cannot drift from the data.
 
 ## Related
 

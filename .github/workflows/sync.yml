@@ -35,14 +35,17 @@ jobs:
       matrix:
         org:
           - CSOIreland
+          - covidgreen
+          - derilinx
           - Geological-Survey-Ireland
           - HSEIreland
           - IrishMarineInstitute
+          - localgovdrupal
           - MetEireann
-          - Oireachtas
-          - Teagasc
           - ogcio
+          - Oireachtas
           - revenue-ie
+          - Teagasc
     steps:
       - uses: actions/checkout@v4
 
@@ -51,16 +54,9 @@ jobs:
           git lfs install --skip-smudge
           git config --global advice.detachedHead false
 
-      - uses: actions/create-github-app-token@v1
-        id: app
-        with:
-          app-id: ${{ vars.MIRROR_APP_ID }}
-          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
       - name: Sync shard
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
           MIRROR_ORG: ${{ github.repository_owner }}
           WORKDIR: ${{ runner.temp }}/work
         run: |
@@ -69,14 +65,14 @@ jobs:
           FORCE=""
           [ "${{ inputs.force_all }}" = "true" ] && FORCE="--force-all"
 
-          python scripts/enumerate.py --org "${{ matrix.org }}" \
+          python scripts/enumerate.py --ns "${{ matrix.org }}" \
             --emit-changed $FORCE > worklist.tsv || true
           echo "$(wc -l < worklist.tsv) repositories to sync"
 
           FAILED=0
-          while IFS=$'\t' read -r clone_url mirror_name default_branch; do
+          while IFS=$'\t' read -r clone_url mirror_name default_branch tier; do
             [ -z "${clone_url:-}" ] && continue
-            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch"
+            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"
             rc=$?
             case "$rc" in
               0) ;;
@@ -96,8 +92,8 @@ jobs:
       - name: Record sync results in manifest
         if: always()
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: python scripts/enumerate.py --org "${{ matrix.org }}" --update-manifest
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: python scripts/enumerate.py --ns "${{ matrix.org }}" --update-manifest
 
       - name: Commit manifest
         if: always()

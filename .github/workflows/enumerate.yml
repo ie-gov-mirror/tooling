@@ -25,36 +25,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/create-github-app-token@v1
-        id: app
-        with:
-          app-id: ${{ vars.MIRROR_APP_ID }}
-          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
       - name: Drift report
         id: drift
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
         # enumerate.py exits non-zero when there is drift needing attention,
         # which is information, not failure.
         run: python scripts/enumerate.py --report | tee drift.txt || true
 
       - name: Update manifest
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
         run: python scripts/enumerate.py --update-manifest
 
       - name: Check for vanished upstreams
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
           MIRROR_ORG: ${{ github.repository_owner }}
         run: python scripts/tombstone.py --check-all
+
+      - name: Regenerate the deleted-repository report
+        # docs/DELETED.md is generated from tombstones.csv so it cannot drift.
+        run: python scripts/deleted_repo_report.py
 
       - name: Open manifest PR
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ steps.app.outputs.token }}
+          token: ${{ secrets.MIRROR_TOKEN }}
           branch: bot/manifest-drift
           commit-message: "Update manifest from upstream enumeration"
           title: "Manifest drift from upstream enumeration"

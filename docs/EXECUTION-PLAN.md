@@ -15,10 +15,12 @@ Computed from `manifest/inventory-2026-08-11.csv`, not estimated:
 
 | Tier | Repos | Size | Destination |
 |---|---:|---:|---|
-| **core** | 191 | **11.51 GiB** (12.07 GB) | `ie-gov-mirror` |
-| **extended** | 18 | 44.5 MiB | separate org (§6) |
-| **candidate** | 18 | 892 MiB | never mirrored; watchlist only |
+| **core** | 191 | **11.51 GiB** | `ie-gov-mirror` |
+| **extended** | 18 | 44.5 MiB | `ie-gov-mirror`, labelled not-government-owned |
+| **candidate** | 18 | 892 MiB | **not mirrored** — ownership unverified twice (§5) |
 | **adjacent** | 1 | 58 MiB | not mirrored; linked from README |
+
+**Mirrored total: 209 repositories, 11.56 GiB, across 12 namespaces.**
 
 Core repos by namespace: IrishMarineInstitute 100, CSOIreland 35, Oireachtas 18,
 HSEIreland 15, Teagasc 7, ogcio 6, revenue-ie 5, MetEireann 3,
@@ -47,11 +49,11 @@ Geological-Survey-Ireland 2.
    repos, 5 IrishMarineInstitute, 1 CSOIreland, 1 ogcio. Recorded in the
    manifest, but the mirrors are **not** GitHub-archived: upstream archives
    are occasionally unarchived and pushed to. Only tombstones get archived.
-5. **No name collisions within core** — so a flat namespace would work
-   *today*. But collisions appear the moment the extended tier is added
-   (`HSEIreland/covid-green-backend-api` vs
-   `covidgreen/covid-green-backend-api`, and six siblings). Prefixing solves
-   this permanently for the cost of longer names.
+5. **No name collisions at all under `owner.repo`** — verified across all
+   209 mirrored repos. Seven clashes *would* exist under flat bare-name
+   naming, all `HSEIreland/covid-green-*` against `covidgreen/covid-green-*`,
+   but the owner segment separates them. This is why the extended tier needs
+   no name prefix.
 
 ---
 
@@ -82,14 +84,20 @@ Expect the same here: **the manifest is the inventory, not GitHub search.**
 
 ### Two places we deliberately diverge
 
-- **Bus factor.** uk-gov-mirror is one person and a private script. This plan
-  uses an org-owned GitHub App, two org owners minimum, public workflows, and
-  an in-repo manifest — so the archive outlives any individual.
-- **Discoverability of intent.** uk-gov-mirror puts the disclaimer only in the
-  org description. We add a `.github` profile README, per-repo homepage links
-  to upstream, and `mirror`/`unofficial` topics. Ireland has nine small
-  upstream namespaces, so a mirror will rank highly in searches for them —
-  the "mistaken for official" risk is materially higher than for the UK.
+- **Discoverability of intent.** uk-gov-mirror puts the disclaimer only in
+  the org description. We add a `.github` profile README, per-repo homepage
+  links to upstream, and `mirror`/`unofficial` topics — plus
+  `not-government-owned` on the extended tier. Ireland has nine small upstream
+  namespaces, so a mirror will rank highly in searches for them; the
+  "mistaken for official" risk is materially higher than for the UK.
+- **Provenance in the open.** uk-gov-mirror's sync engine is unpublished. Here
+  the manifest, scripts and workflow logs are all public, so the archive's
+  coverage and cadence are auditable by anyone.
+
+Where we *match* uk-gov-mirror, deliberately: **one operator** (decision 10).
+The mitigations that don't need a second person — public workflows, an in-repo
+manifest, a group contact address — are in place. What stays unmitigated is
+that if the operator stops, the archive silently stops updating.
 
 ---
 
@@ -149,31 +157,40 @@ rather than counting as a failure.
   mirrored repos contain `.github/workflows/*` with `on: push` or
   `on: schedule`. Without this, **mirrored third-party workflows execute in
   our org on every sync.** This is the single most dangerous default.
-- **Secret scanning: alerts ON, push protection OFF.** Push protection is on
-  by default for public repos and **will block the backfill** the first time
-  upstream history contains anything matching a secret pattern. Fidelity
-  requires pushing history verbatim, and these secrets are already public
-  upstream. Keep alerts on so we know what we are re-hosting, and adopt a
-  written policy of notifying the upstream body when a live-looking
-  credential surfaces. See `POLICY.md`.
+- **Secret scanning: both push protection and alerts OFF.** Push protection
+  is on by default for public repos and **will block the backfill** the first
+  time upstream history contains anything matching a secret pattern; fidelity
+  requires pushing history verbatim, and these commits are already public
+  upstream. Alerts are off too, which means **no proactive signal for
+  credentials in mirrored history** — `POLICY.md` therefore commits only to a
+  reactive process: notify the upstream body if a credential is reported.
 
 The pushing token also needs **Workflows: write**, or any push touching a
 workflow file is rejected.
 
-### 3.5 Credentials: org-owned GitHub App
+### 3.5 Credentials: fine-grained PAT now, GitHub App later
 
 The control repo's built-in `GITHUB_TOKEN` **cannot** create repositories in
 the org, so it is not an option.
 
-| | Fine-grained PAT | **GitHub App (recommended)** |
+**Decision: a fine-grained PAT**, stored as the `MIRROR_TOKEN` org secret,
+migrating to an org-owned GitHub App once backfill is done.
+
+| | **Fine-grained PAT (now)** | GitHub App (later) |
 |---|---|---|
 | Rate limit | 5,000 req/hr | scales to **12,500 req/hr** |
 | Token lifetime | months, manual rotation | minted per job, 1-hour expiry |
 | Ownership | tied to one person's account | owned by the org, survives people leaving |
 
-Either way the permissions are: **Administration: write** (create repos, set
-default branch, archive tombstones), **Contents: write**, **Workflows:
-write**, **Metadata: read**.
+Permissions either way: **Administration: write** (create repos, set default
+branch, set topics, archive tombstones), **Contents: write**, **Workflows:
+write** (mandatory — pushes touching `.github/workflows/*` are rejected
+without it), **Metadata: read**. Optionally **Pull requests: write** for the
+manifest-drift PRs.
+
+The PAT's 5,000 req/hr is ample: backfill is ~209 repo creations plus a few
+hundred metadata calls. The reason to migrate is hygiene and continuity, not
+throughput — so it is not on the critical path.
 
 > Confirmed the hard way while writing this plan: the session token scoped to
 > a single repo returns `403 Resource not accessible by integration` on
@@ -214,11 +231,13 @@ assets in bulk. Data volume, not repo count, is what will force a VM.
 - [ ] Org description: *"Unofficial mirror of Irish public-sector GitHub
       repositories, to preserve code that is removed or made private. Not
       affiliated with or endorsed by any Irish public body. Updated at least
-      weekly."* (Only claim "weekly" once Phase 3 has been green for a month.)
+      weekly."*
 - [ ] `ie-gov-mirror/.github` repo with `profile/README.md`: the same
       disclaimer, the takedown and data-erasure contact, and a link to this
       manifest.
-- [ ] Base member permission **read**; 2FA required; **two org owners**.
+- [ ] Base member permission **read**; 2FA required. Single owner by
+      decision (10) — the contact address is a group so the contact route
+      survives even though the operator is a single point of failure.
 - [ ] **Actions disabled for all repos except `tooling`** (§3.4).
 - [ ] Pages disabled org-wide. New-repo defaults: issues, wiki, projects,
       discussions all **off**.
@@ -226,8 +245,8 @@ assets in bulk. Data volume, not repo count, is what will force a VM.
 - [ ] No branch protection anywhere — mirrors need force-push and ref deletion.
 - [ ] Dependabot alerts **off** org-wide: alert noise on 191 repos we do not
       maintain is pure cost.
-- [ ] Create the GitHub App (§3.5), install on the org, store `MIRROR_APP_ID`
-      as an org variable and `MIRROR_APP_PRIVATE_KEY` as an org secret.
+- [ ] Create the fine-grained PAT (§3.5) and store it as the `MIRROR_TOKEN`
+      org secret. Diarise the migration to a GitHub App after backfill.
 
 ### Phase 1 — Control repo (this repo, largely done)
 
@@ -236,7 +255,7 @@ tooling/
 ├── manifest/
 │   ├── core.csv                  # 191 rows: the authoritative worklist
 │   ├── extended.csv              # 18 rows, separate destination org
-│   ├── candidates.csv            # 18 rows, status never-sync
+│   ├── candidates.csv            # 18 rows, status dropped-unverified
 │   ├── adjacent.csv              # 1 row, not mirrored
 │   ├── tombstones.csv            # upstreams that have disappeared
 │   ├── inventory-2026-08-11.csv  # original research snapshot, unmodified
@@ -283,8 +302,9 @@ Two rules encoded in the tooling:
    Add topics `mirror`, `unofficial`, and the upstream org slug.
    **Repository contents are never modified** — no injected README, no
    relicensing, no history rewriting. Fidelity means bit-identical git data.
-4. Verify: 191 repos, ~11.5 GiB, 22 flagged `upstream_archived=true` in the
-   manifest but **not** GitHub-archived.
+4. Verify: **209 repos, ~11.56 GiB**, 22 flagged `upstream_archived=true` in
+   the manifest but **not** GitHub-archived, and 18 carrying the
+   `not-government-owned` topic.
 
 ### Phase 3 — Steady state
 
@@ -341,38 +361,79 @@ data published upstream by accident and then force-pushed away will be
 preserved by our mirror**. `POLICY.md` must draw that line before the first
 incident, not during it.
 
-### Open questions
+### Decisions taken
 
-1. **Org for the extended tier** — recommendation: a second org,
-   `ie-gov-adjacent-mirror`, rather than a name prefix inside the main org.
-   The research report's constraint is that government ownership must never be
-   implied, and a prefix is too subtle; a separate org with its own
-   description is unambiguous. It also structurally removes the seven
-   covid-green collisions. Cost: a second App installation and a
-   `--target-org` flag. **Confirm or overrule.**
-2. **GitHub App or PAT**, and whose account owns it?
-3. **Accept push protection off** org-wide for fidelity, with a
-   notify-upstream policy for scanning alerts?
-4. **Mirror repos that have no licence file?** (Recommendation: yes, with a
-   documented takedown policy. uk-gov-mirror does, implicitly.)
-5. **Named takedown / GDPR contact** for the org profile — who, and at what
-   address?
-6. **Notify OGCIO?** Recommendation: yes, shortly *after* backfill —
-   informing, not asking permission, since asking invites a default "no" to
-   something already public and lawful. It doubles as the channel the research
-   report wants for verifying the 18 candidates and asking about self-hosted
-   forges. Who sends it, and in what register?
-7. **Phase 3 scope** — wikis and release assets yes/no; issues and PRs yes/no?
-8. **Tombstone presentation** — manifest CSV plus GitHub-archived repo
-   (recommended), or also a public `deleted-repo-report`-style page?
-9. **Is "gov" in the org name acceptable?** It follows the tolerated
-   uk-gov-mirror pattern, but GitHub occasionally reclaims names that imply
-   government affiliation. Judgment call.
-10. **Second org owner** — who, so this is not a one-person archive?
+| # | Question | Decision |
+|---|---|---|
+| 1 | Extended tier destination | **Same org, no name prefix.** Marked by a `not-government-owned` topic and an explicit description. Verified there are **zero collisions across all 209 repos** under `owner.repo` — the 7 `covid-green-*` clashes only exist under flat naming, and the owner segment separates them. |
+| 2 | Credential | **Fine-grained PAT now, migrate to a GitHub App later.** Stored as the `MIRROR_TOKEN` org secret. |
+| 3 | Secret scanning | **Push protection and alerts both off.** |
+| 4 | Unlicensed repos | **Mirror them**, relying on the removal-request policy. |
+| 5 | Contact | **ie-gov-mirror@googlegroups.com** — a group, so the contact route outlives any one inbox. |
+| 6 | Notify OGCIO | **No.** Stay quiet; `POLICY.md`'s request route is the sole contact path. |
+| 7 | Scope beyond git data | **Git data only.** No wikis, release assets, issues or PRs — matching uk-gov-mirror, and keeping the personal-data surface to commit metadata. |
+| 8 | Tombstones | Manifest + GitHub-archive the mirror **+ a generated public report** at `docs/DELETED.md` (`scripts/deleted_repo_report.py`). |
+| 9 | Org name | **Keep `ie-gov-mirror`**, following the tolerated uk-gov-mirror pattern. |
+| 10 | Second owner | **Solo for now.** Same posture as uk-gov-mirror; the Google Group contact softens it. |
+| 11 | Accidental publication upstream | **Preserve everything; remove on request.** A bright-line rule with no case-by-case judgement. |
+| 12 | Reported live credential | **Notify upstream, leave the mirror up.** Removal only if the body requests it. |
+| 13 | The 18 candidates | **Dropped** — see below. |
+| 14 | Cadence | **Claim "updated at least weekly"** from the start. |
 
-Not recommended: a `meta-repository`-style submodule metarepo. It earns its
-keep at 26,416 repos; at 191 the manifest CSV serves the same discovery need.
+Not adopted: a `meta-repository`-style submodule metarepo. It earns its keep
+at 26,416 repos; at 209 the manifest CSV serves the same discovery need.
 Revisit past ~1,000 repos.
+
+### Two decisions with costs worth restating
+
+**Secret scanning fully off (#3).** Push protection off is necessary — it would
+block the backfill on the first secret pattern in upstream history. Turning
+*alerts* off as well means there is no proactive signal for credentials in
+11.5 GiB of mirrored history. `POLICY.md` therefore commits only to a reactive
+process: notify upstream if a credential is reported. That is a promise the
+setup can actually keep.
+
+**Solo operation (#10).** uk-gov-mirror has survived five years this way, so
+the precedent is real. The mitigations that don't depend on a second person are
+in place: public workflows, an in-repo manifest, and a group contact address.
+What remains unmitigated is that if the operator stops, the archive silently
+stops updating.
+
+### Why the 18 candidates were dropped
+
+The candidate tier was checked twice and failed both times.
+
+The original research found no authoritative cross-link for any of them. A
+second check against **data.gov.ie** on 2026-08-20 — the CKAN
+`resource_search`, `package_search` and `organization_show` endpoints —
+found:
+
+- **No GitHub reference in any candidate body's portal profile.** Cavan, Dún
+  Laoghaire–Rathdown, Kerry and Kildare County Councils, Tailte Éireann and
+  Sport Ireland are all publishers on data.gov.ie, but none links to a GitHub
+  namespace.
+- **The portal references exactly one GitHub namespace in total**:
+  `IrishMarineInstitute`, which is already core. (Plus `MobilityData`, a
+  third party.)
+
+The councils being publishers proves the *bodies* publish open data. It says
+nothing about who owns a GitHub handle, which is what needed verifying.
+
+What the tier actually contained also argued against it: **11 of 18 are
+empty**, and 771 MiB of the 892 MiB is `Cavancoco/AspNetCore.Docs`, a fork of
+Microsoft's ASP.NET Core documentation. Several names read like individuals
+learning git — `kerrycoco/myfirstTest`, `OrdnanceSurveyIreland/OracleTeam`.
+The genuine archival content was ~142 MiB.
+
+The highest risk was `govdataie`: an unbranded personal account holding five
+empty repos named after the Arts Council, the Central Bank, Fáilte Ireland, the
+Heritage Council and RTÉ. Mirroring it under a `gov`-named org would publicly
+assert state ownership of repositories that may belong to a private individual.
+
+**This is a negative search result, not proof of non-ownership.** The rows stay
+in `manifest/candidates.csv` with `status=dropped-unverified` and the check
+recorded, so a future crawl need not redo the work. If a body confirms a
+handle, the row moves to `core.csv` by pull request.
 
 ---
 
@@ -381,8 +442,8 @@ Revisit past ~1,000 repos.
 | Tier | Destination | Sync |
 |---|---|---|
 | core (191) | `ie-gov-mirror`, `Owner.repo` | daily enumerate, weekly sync |
-| extended (18) | separate org (open question 1) | same tooling, `--target-org` |
-| candidate (18) | nowhere | `status=never-sync`; optionally watch `pushed_at` so activity is noticed. Nothing is cloned until the relevant body confirms ownership, at which point a row moves to core by PR. |
+| extended (18) | `ie-gov-mirror`, same as core | Same tooling, `tier=extended` passed to `sync_repo.sh`, which sets the `not-government-owned` topic and an explicit description. Only the repos the manifest names are synced — these namespaces are **not** enumerated wholesale, since `covidgreen` and `derilinx` are not government namespaces. |
+| candidate (18) | nowhere | `status=dropped-unverified`. Documented with the failed data.gov.ie check so a future crawl need not redo it. A confirmed handle moves to `core.csv` by PR. |
 | adjacent (1) | nowhere | `legalize-dev/legalize-ie` is linked from the README as a companion project, per its own self-description as an independent derivative. |
 
 ---

@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""Re-enumerate the verified upstream namespaces and diff against the manifest.
+"""Re-enumerate upstream namespaces and diff against the manifest.
 
 The research snapshot is a point-in-time list; upstream orgs gain, rename and
-lose repositories. This script is the only thing that decides what exists. It
-never deletes manifest rows: disappearances are reported for the tombstone
-flow, and new repositories are reported for a human to approve.
+lose repositories. This script decides what exists.
+
+Two classes of namespace, treated differently on purpose:
+
+  * DISCOVERY namespaces (the nine verified public bodies) are enumerated
+    wholesale. Every public repo in them is in scope, because the namespace
+    itself is what was verified as belonging to a public body.
+
+  * LISTED namespaces (extended and candidate tiers) are NOT enumerated.
+    Only the specific repositories recorded in the manifest are synced.
+    `covidgreen`, `Cavancoco` and `govdataie` are not government namespaces;
+    enumerating them wholesale would pull in arbitrary unrelated repos.
 
 Usage:
-  enumerate.py --report                 # human-readable drift report
+  enumerate.py --report                 # drift report across all namespaces
   enumerate.py --emit-changed           # tab-separated worklist for sync
-  enumerate.py --emit-changed --org CSOIreland
+  enumerate.py --emit-changed --ns CSOIreland
   enumerate.py --update-manifest        # apply last_seen / pushed_at / new rows
 """
 
@@ -25,11 +34,25 @@ from datetime import date
 from pathlib import Path
 
 MANIFEST_DIR = Path(__file__).resolve().parent.parent / "manifest"
-CORE = MANIFEST_DIR / "core.csv"
 
-# The nine namespaces tied to a named public body by the research snapshot.
-# Adding a namespace here is a deliberate, reviewable act.
-VERIFIED_ORGS = [
+# Tier file -> whether the namespace is enumerated wholesale.
+#
+# candidates.csv and adjacent.csv are deliberately absent: they are
+# documentation, never mirrored. The 18 candidates were checked against
+# data.gov.ie on 2026-08-20 (CKAN resource_search, package_search and
+# organization_show) and no cross-link between any candidate namespace and a
+# public body was found - the portal references exactly one GitHub namespace in
+# total, IrishMarineInstitute, which is already core. Keeping the file records
+# that verification was attempted and failed, so a future crawl need not redo it.
+TIER_FILES = {
+    "core.csv": True,
+    "extended.csv": False,
+}
+
+# Namespaces tied to a named public body by the research snapshot. Adding one
+# here means "every public repo in this namespace is government code", which is
+# a deliberate, reviewable claim.
+DISCOVERY_NAMESPACES = [
     "CSOIreland",
     "Geological-Survey-Ireland",
     "HSEIreland",
@@ -44,21 +67,25 @@ VERIFIED_ORGS = [
 API = "https://api.github.com"
 
 
-def api_get(path):
-    """Paginated GitHub REST GET. Authenticated to get 5,000 req/hr not 60."""
-    url = f"{API}{path}"
+def api_request(path):
+    """Single GitHub REST GET returning (payload, link header)."""
+    req = urllib.request.Request(f"{API}{path}" if path.startswith("/") else path)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
     token = os.environ.get("GH_TOKEN", "")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp), resp.headers.get("Link", "")
+
+
+def api_get(path, allow_missing=False):
+    """Paginated GET. Authenticated for 5,000 req/hr rather than 60."""
     out = []
+    url = path
     while url:
-        req = urllib.request.Request(url)
-        req.add_header("Accept", "application/vnd.github+json")
-        req.add_header("X-GitHub-Api-Version", "2022-11-28")
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
         try:
-            with urllib.request.urlopen(req) as resp:
-                out.extend(json.load(resp))
-                link = resp.headers.get("Link", "")
+            payload, link = api_request(url)
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
@@ -70,20 +97,20 @@ def api_get(path):
                 time.sleep(60)
                 continue
             if exc.code in (401, 403):
-                # Almost always a missing, expired or under-scoped token
-                # rather than a bug. Say so instead of dumping a traceback.
                 raise SystemExit(
-                    f"HTTP {exc.code} on {path}\n"
-                    "GH_TOKEN is missing, expired, or lacks Metadata: read on "
-                    "the target org. Unauthenticated requests are also capped "
-                    "at 60/hour, which this script will exceed."
+                    f"HTTP {exc.code} on {url}\n"
+                    "GH_TOKEN is missing, expired, or lacks Metadata: read. "
+                    "Unauthenticated requests are capped at 60/hour, which "
+                    "this script will exceed."
                 ) from None
             if exc.code == 404:
+                if allow_missing:
+                    return None
                 raise SystemExit(
-                    f"HTTP 404 on {path} - namespace renamed or deleted? "
-                    "Check VERIFIED_ORGS."
+                    f"HTTP 404 on {url} - namespace renamed or deleted?"
                 ) from None
             raise
+        out.extend(payload) if isinstance(payload, list) else out.append(payload)
         url = ""
         for part in link.split(","):
             if 'rel="next"' in part:
@@ -96,117 +123,175 @@ def mirror_name(owner, name):
 
     A dot is used because GitHub owner names cannot contain dots, so splitting
     on the first dot always recovers the upstream exactly. Hyphen-joining is
-    ambiguous (revenue-ie/dpl vs a repo literally named revenue-ie-dpl) and
-    loses case. This matches the uk-gov-mirror convention.
+    ambiguous (revenue-ie/dpl vs a repo named revenue-ie-dpl) and loses case.
+    Matches the uk-gov-mirror convention.
     """
     return f"{owner}.{name}"
 
 
-def load_manifest(path):
+def load_tier(filename):
+    path = MANIFEST_DIR / filename
     if not path.exists():
         return [], []
     with path.open() as fh:
         reader = csv.DictReader(fh)
-        return list(reader), list(reader.fieldnames or [])
+        rows = list(reader)
+        return rows, list(reader.fieldnames or [])
 
 
-def write_manifest(path, rows, fields):
-    with path.open("w", newline="") as fh:
+def write_tier(filename, rows, fields):
+    with (MANIFEST_DIR / filename).open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
         for row in sorted(rows, key=lambda r: r["upstream"].lower()):
             writer.writerow(row)
 
 
-def enumerate_orgs(orgs):
-    live = {}
-    for org in orgs:
-        repos = api_get(f"/orgs/{org}/repos?per_page=100&type=public")
-        for repo in repos:
-            live[repo["full_name"]] = repo
-        print(f"{org}: {len(repos)} public repos", file=sys.stderr)
-    return live
+def load_all():
+    """Return {filename: (rows, fields)} for every mirrored tier."""
+    return {name: load_tier(name) for name in TIER_FILES}
+
+
+def namespaces(tiers):
+    """Every namespace present in the manifest, in sync-shard order.
+
+    A namespace can span tiers - `derilinx` holds one extended repo and two
+    candidates - so this is a set over all tier files, not a per-tier list.
+    """
+    seen = set()
+    for rows, _ in tiers.values():
+        for row in rows:
+            seen.add(row["upstream"].split("/")[0])
+    return sorted(seen, key=str.lower)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--org", action="append", help="limit to one or more orgs")
+    ap.add_argument("--ns", "--org", action="append", dest="ns",
+                    help="limit to one or more namespaces")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--emit-changed", action="store_true")
     ap.add_argument("--update-manifest", action="store_true")
+    ap.add_argument("--list-namespaces", action="store_true")
     ap.add_argument("--force-all", action="store_true",
                     help="emit every repo, not just those pushed since last sync")
     args = ap.parse_args()
 
-    orgs = args.org or VERIFIED_ORGS
-    rows, fields = load_manifest(CORE)
-    by_upstream = {r["upstream"]: r for r in rows}
-    live = enumerate_orgs(orgs)
+    tiers = load_all()
 
-    scoped = [r for r in rows if r["upstream"].split("/")[0] in orgs]
-    new = sorted(set(live) - {r["upstream"] for r in rows})
-    gone = sorted(r["upstream"] for r in scoped if r["upstream"] not in live)
+    if args.list_namespaces:
+        for ns in namespaces(tiers):
+            print(ns)
+        return 0
 
+    scope = args.ns or namespaces(tiers)
+    live = {}          # upstream full_name -> API record
+    new_upstream = []  # discovered, not yet in the manifest
+
+    # Discovery namespaces: enumerate wholesale.
+    for ns in scope:
+        if ns not in DISCOVERY_NAMESPACES:
+            continue
+        repos = api_get(f"/orgs/{ns}/repos?per_page=100&type=public")
+        for repo in repos or []:
+            live[repo["full_name"]] = repo
+        print(f"{ns}: {len(repos or [])} public repos (enumerated)", file=sys.stderr)
+
+    # Listed namespaces: fetch only the repositories the manifest names.
+    listed = []
+    for filename, (rows, _) in tiers.items():
+        if TIER_FILES[filename]:
+            continue
+        listed += [r for r in rows if r["upstream"].split("/")[0] in scope]
+    for row in listed:
+        repo = api_get(f"/repos/{row['upstream']}", allow_missing=True)
+        if repo:
+            live[row["upstream"]] = repo[0] if isinstance(repo, list) else repo
+    if listed:
+        print(f"{len(listed)} listed repos checked individually", file=sys.stderr)
+
+    known = {r["upstream"] for rows, _ in tiers.values() for r in rows}
+    new_upstream = sorted(set(live) - known)
+
+    in_scope = [r for rows, _ in tiers.values() for r in rows
+                if r["upstream"].split("/")[0] in scope]
+    gone = sorted(r["upstream"] for r in in_scope if r["upstream"] not in live)
+
+    by_upstream = {r["upstream"]: r for rows, _ in tiers.values() for r in rows}
     changed = []
     for full_name, repo in sorted(live.items()):
         row = by_upstream.get(full_name)
         pushed = repo.get("pushed_at") or ""
         if row is None:
             changed.append((full_name, mirror_name(*full_name.split("/", 1)),
-                            repo.get("default_branch") or ""))
-        elif args.force_all or not row.get("last_synced") \
-                or pushed > (row.get("upstream_pushed_at") or ""):
+                            repo.get("default_branch") or "", "core"))
+        elif (args.force_all or not row.get("last_synced")
+              or pushed > (row.get("upstream_pushed_at") or "")):
             changed.append((full_name, row["mirror_name"],
-                            repo.get("default_branch") or row.get("default_branch") or ""))
+                            repo.get("default_branch") or row.get("default_branch") or "",
+                            row.get("tier") or "core"))
 
     if args.report:
+        print(f"namespaces in scope: {len(scope)}")
         print(f"live upstream repos: {len(live)}")
-        print(f"manifest rows in scope: {len(scoped)}")
+        print(f"manifest rows in scope: {len(in_scope)}")
         print(f"needing sync: {len(changed)}")
-        print(f"new upstream (approve before mirroring): {len(new)}")
-        for n in new:
+        print(f"new upstream (review before mirroring): {len(new_upstream)}")
+        for n in new_upstream:
             print(f"  + {n}")
         print(f"disappeared upstream (tombstone candidates): {len(gone)}")
         for g in gone:
             print(f"  - {g}")
 
     if args.emit_changed:
-        for upstream, mirror, branch in changed:
-            clone = f"https://github.com/{upstream}.git"
-            print(f"{clone}\t{mirror}\t{branch}")
+        for upstream, mirror, branch, tier in changed:
+            print(f"https://github.com/{upstream}.git\t{mirror}\t{branch}\t{tier}")
 
     if args.update_manifest:
         today = date.today().isoformat()
-        for full_name, repo in live.items():
-            row = by_upstream.get(full_name)
-            if row is None:
-                # New upstream repo: recorded as pending, never auto-synced.
-                # A human approves it by merging the bot's PR.
-                row = {f: "" for f in fields}
-                row.update({
-                    "upstream": full_name,
-                    "mirror_name": mirror_name(*full_name.split("/", 1)),
-                    "tier": "core",
-                    "public_body": repo["owner"]["login"],
-                    "ownership_confidence": "unreviewed",
-                    "clone_url": f"https://github.com/{full_name}.git",
-                    "web_url": f"https://github.com/{full_name}",
-                    "first_seen": today,
-                    "status": "pending-review",
-                    "lfs": "unknown",
-                })
-                rows.append(row)
-                by_upstream[full_name] = row
-            row["last_seen"] = today
-            row["upstream_pushed_at"] = repo.get("pushed_at") or ""
-            row["upstream_archived"] = str(bool(repo.get("archived"))).lower()
-            row["default_branch"] = repo.get("default_branch") or row.get("default_branch", "")
-            row["size_kb"] = repo.get("size") or row.get("size_kb", 0)
-        write_manifest(CORE, rows, fields)
-        print(f"manifest updated: {len(rows)} rows", file=sys.stderr)
+        core_rows, core_fields = tiers["core.csv"]
+        for filename, (rows, fields) in tiers.items():
+            for row in rows:
+                repo = live.get(row["upstream"])
+                if not repo:
+                    continue
+                row["last_seen"] = today
+                row["upstream_pushed_at"] = repo.get("pushed_at") or ""
+                row["upstream_archived"] = str(bool(repo.get("archived"))).lower()
+                row["default_branch"] = repo.get("default_branch") or row.get("default_branch", "")
+                row["size_kb"] = repo.get("size") or row.get("size_kb", 0)
+            write_tier(filename, rows, fields)
 
-    # Non-zero exit signals drift needing human attention, for workflow gating.
-    return 1 if (new or gone) else 0
+        # Newly discovered repos in verified namespaces join core as
+        # pending-review. Discovery means the namespace is verified, not that
+        # any individual repo has been looked at.
+        added = 0
+        for full_name in new_upstream:
+            repo = live[full_name]
+            row = {f: "" for f in core_fields}
+            row.update({
+                "upstream": full_name,
+                "mirror_name": mirror_name(*full_name.split("/", 1)),
+                "tier": "core",
+                "public_body": repo["owner"]["login"],
+                "ownership_confidence": "unreviewed",
+                "clone_url": f"https://github.com/{full_name}.git",
+                "web_url": f"https://github.com/{full_name}",
+                "default_branch": repo.get("default_branch") or "",
+                "upstream_archived": str(bool(repo.get("archived"))).lower(),
+                "size_kb": repo.get("size") or 0,
+                "first_seen": today,
+                "last_seen": today,
+                "status": "pending-review",
+                "lfs": "unknown",
+            })
+            core_rows.append(row)
+            added += 1
+        if added:
+            write_tier("core.csv", core_rows, core_fields)
+        print(f"manifest updated ({added} new rows)", file=sys.stderr)
+
+    return 1 if (new_upstream or gone) else 0
 
 
 if __name__ == "__main__":
