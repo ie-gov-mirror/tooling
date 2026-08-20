@@ -2,8 +2,11 @@ name: enumerate upstream
 
 # Re-enumerates the nine verified namespaces through the API rather than
 # trusting the static research snapshot. ~13 API calls, so it runs daily.
-# It never mirrors anything: new repositories land as a manifest PR for a
-# human to approve, and disappearances go to the tombstone flow.
+#
+# New repositories in those namespaces are accepted automatically and
+# committed straight to the branch - the verified thing is the namespace, so a
+# new repo inside one needs no separate approval. They are mirrored by the next
+# sync run. Disappearances go to the tombstone flow, which never deletes.
 
 on:
   schedule:
@@ -11,8 +14,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  # Load-bearing: the commit step below pushes using the credentials
+  # actions/checkout persists, which are GITHUB_TOKEN's.
   contents: write
-  pull-requests: write
 
 concurrency:
   group: enumerate
@@ -48,14 +52,23 @@ jobs:
         # docs/DELETED.md is generated from tombstones.csv so it cannot drift.
         run: python scripts/deleted_repo_report.py
 
-      - name: Open manifest PR
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.MIRROR_TOKEN }}
-          branch: bot/manifest-drift
-          commit-message: "Update manifest from upstream enumeration"
-          title: "Manifest drift from upstream enumeration"
-          body-path: drift.txt
-          labels: manifest
-          # A human merges this. New repositories are never mirrored on the
-          # strength of a name alone; ownership has to be reviewed first.
+      - name: Commit manifest
+        run: |
+          # Committed directly: new repos in verified namespaces are
+          # auto-accepted, so there is nothing to approve. `git log
+          # manifest/core.csv` remains the audit trail of what was added when,
+          # and each auto-accepted row records the namespace it came from.
+          git config user.name "ie-gov-mirror bot"
+          git config user.email "noreply@github.com"
+          git add manifest/ docs/DELETED.md
+          if git diff --quiet --cached; then
+            echo "no manifest changes"
+            exit 0
+          fi
+          git commit -m "Update manifest from upstream enumeration"
+          git pull --rebase --autostash origin "${{ github.ref_name }}" || true
+          git push origin HEAD:"${{ github.ref_name }}"
+
+      - name: Summary
+        if: always()
+        run: cat drift.txt >> "$GITHUB_STEP_SUMMARY" || true

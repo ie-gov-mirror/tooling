@@ -185,8 +185,9 @@ migrating to an org-owned GitHub App once backfill is done.
 Permissions either way: **Administration: write** (create repos, set default
 branch, set topics, archive tombstones), **Contents: write**, **Workflows:
 write** (mandatory — pushes touching `.github/workflows/*` are rejected
-without it), **Metadata: read**. Optionally **Pull requests: write** for the
-manifest-drift PRs.
+without it), **Metadata: read**. No `Pull requests` permission is required:
+new repositories in verified namespaces are auto-accepted and committed
+directly, so there is no review PR.
 
 The PAT's 5,000 req/hr is ample: backfill is ~209 repo creations plus a few
 hundred metadata calls. The reason to migrate is hygiene and continuity, not
@@ -277,12 +278,20 @@ commits update `first_seen` / `last_seen` / `last_synced` /
 `upstream_pushed_at`, so `git log manifest/core.csv` is a complete audit
 trail. No database needed.
 
-Two rules encoded in the tooling:
+Three rules encoded in the tooling:
 
-- **New upstream repos are never auto-mirrored.** They arrive as a manifest
-  PR with `status=pending-review`, `ownership_confidence=unreviewed`. A human
-  merges. A plausible-looking namespace is not evidence of public ownership —
-  that is exactly what the candidate tier is for.
+- **New repos in verified namespaces are auto-accepted.** The daily
+  enumeration adds them with `ownership_confidence=high`, `status=pending` and
+  a `fidelity_notes` entry recording the namespace they came from, then commits
+  directly to the branch. The next sync mirrors them. The verified thing is the
+  namespace: a new repository in `CSOIreland` is CSO code on the same evidence
+  that covers the other 35, so there is nothing extra for a human to approve.
+- **`DISCOVERY_NAMESPACES` in `scripts/enumerate.py` is the only thing that
+  grants that automatic trust**, and only a human editing that file changes it.
+  Extended-tier namespaces are deliberately *not* enumerated wholesale — only
+  the repositories the manifest names are fetched, because `covidgreen`,
+  `derilinx` and `localgovdrupal` are not government namespaces and enumerating
+  them would pull in arbitrary unrelated repositories.
 - **Nothing is ever auto-deleted.** Disappearance routes to `tombstone.py`.
 
 ### Phase 2 — Backfill (one weekend)
@@ -308,9 +317,10 @@ Two rules encoded in the tooling:
 
 ### Phase 3 — Steady state
 
-- `enumerate.yml` daily: detects new repos (→ PR), renames (GitHub redirects
-  old clone URLs; follow and update the manifest), deletions (→ tombstone),
-  and `pushed_at` changes.
+- `enumerate.yml` daily: detects new repos (auto-accepted, committed
+  directly, mirrored on the next sync), renames (GitHub redirects old clone
+  URLs; follow and update the manifest), deletions (→ tombstone), and
+  `pushed_at` changes.
 - `sync.yml` weekly, `pushed_at`-gated, sharded 3-at-a-time.
 - Deliberately **out of initial scope** — a bare git mirror captures none of
   these, and uk-gov-mirror does not either:
@@ -365,6 +375,7 @@ incident, not during it.
 
 | # | Question | Decision |
 |---|---|---|
+| 0 | New repos in verified namespaces | **Auto-accepted** — no review gate. Committed directly by the daily enumeration and mirrored on the next sync. |
 | 1 | Extended tier destination | **Same org, no name prefix.** Marked by a `not-government-owned` topic and an explicit description. Verified there are **zero collisions across all 209 repos** under `owner.repo` — the 7 `covid-green-*` clashes only exist under flat naming, and the owner segment separates them. |
 | 2 | Credential | **Fine-grained PAT now, migrate to a GitHub App later.** Stored as the `MIRROR_TOKEN` org secret. |
 | 3 | Secret scanning | **Push protection and alerts both off.** |

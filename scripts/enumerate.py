@@ -8,7 +8,9 @@ Two classes of namespace, treated differently on purpose:
 
   * DISCOVERY namespaces (the nine verified public bodies) are enumerated
     wholesale. Every public repo in them is in scope, because the namespace
-    itself is what was verified as belonging to a public body.
+    itself is what was verified as belonging to a public body. New
+    repositories found here are accepted automatically and mirrored on the
+    next sync - no human review step.
 
   * LISTED namespaces (extended and candidate tiers) are NOT enumerated.
     Only the specific repositories recorded in the manifest are synced.
@@ -127,6 +129,19 @@ def mirror_name(owner, name):
     Matches the uk-gov-mirror convention.
     """
     return f"{owner}.{name}"
+
+
+def body_for_namespace(rows, ns):
+    """The public body name already recorded for a namespace.
+
+    Taken from the manifest rather than a hardcoded table, so the proper name
+    ("Central Statistics Office") is reused instead of the GitHub login. Falls
+    back to the login for a namespace with no existing rows.
+    """
+    for row in rows:
+        if row["upstream"].split("/")[0] == ns and row.get("public_body"):
+            return row["public_body"]
+    return ns
 
 
 def load_tier(filename):
@@ -262,19 +277,28 @@ def main():
                 row["size_kb"] = repo.get("size") or row.get("size_kb", 0)
             write_tier(filename, rows, fields)
 
-        # Newly discovered repos in verified namespaces join core as
-        # pending-review. Discovery means the namespace is verified, not that
-        # any individual repo has been looked at.
+        # Newly discovered repos in discovery namespaces are accepted
+        # automatically, with the same ownership_confidence and status as the
+        # seeded rows. The verified thing is the namespace: if CSOIreland is
+        # the Central Statistics Office's account, a new repository in it is
+        # CSO code by the same evidence that covers the other 35. No human
+        # gate, so a repo published upstream on Monday is mirrored by the
+        # following sync.
+        #
+        # The safety property this relies on is that DISCOVERY_NAMESPACES is
+        # the only list that grants automatic trust, and it is only ever
+        # changed by a human editing this file.
         added = 0
         for full_name in new_upstream:
             repo = live[full_name]
+            ns = full_name.split("/")[0]
             row = {f: "" for f in core_fields}
             row.update({
                 "upstream": full_name,
                 "mirror_name": mirror_name(*full_name.split("/", 1)),
                 "tier": "core",
-                "public_body": repo["owner"]["login"],
-                "ownership_confidence": "unreviewed",
+                "public_body": body_for_namespace(core_rows, ns),
+                "ownership_confidence": "high",
                 "clone_url": f"https://github.com/{full_name}.git",
                 "web_url": f"https://github.com/{full_name}",
                 "default_branch": repo.get("default_branch") or "",
@@ -282,11 +306,14 @@ def main():
                 "size_kb": repo.get("size") or 0,
                 "first_seen": today,
                 "last_seen": today,
-                "status": "pending-review",
+                "status": "pending",
                 "lfs": "unknown",
+                "evidence_url": f"https://github.com/{ns}",
+                "fidelity_notes": f"auto-accepted from verified namespace {ns} on {today}",
             })
             core_rows.append(row)
             added += 1
+            print(f"auto-accepted {full_name}", file=sys.stderr)
         if added:
             write_tier("core.csv", core_rows, core_fields)
         print(f"manifest updated ({added} new rows)", file=sys.stderr)

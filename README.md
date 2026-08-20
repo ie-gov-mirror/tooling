@@ -69,8 +69,9 @@ Requires a fine-grained PAT stored as the `MIRROR_TOKEN` org secret, with
 **Administration: write** (create repos, set default branch and topics,
 archive tombstones), **Contents: write**, **Workflows: write** (mandatory —
 pushes touching `.github/workflows/*` are rejected without it) and
-**Metadata: read**. Migrating to an org-owned GitHub App is planned after
-backfill.
+**Metadata: read**. No `Pull requests` permission is needed — the bot commits
+manifest updates directly. Migrating to an org-owned GitHub App is planned
+after backfill.
 
 ```bash
 # What has drifted from the manifest?
