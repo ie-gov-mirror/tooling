@@ -1,0 +1,93 @@
+name: backfill
+
+# One-time initial mirror of a namespace. Manual only: this is the job that
+# creates repositories, and repository creation is the rate-limited,
+# hardest-to-undo part of the whole exercise. Run smallest namespace first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "Upstream namespace to backfill"
+        required: true
+        type: choice
+        options:
+          - Geological-Survey-Ireland   # 2 repos
+          - MetEireann                  # 3 repos
+          - revenue-ie                  # 5 repos
+          - ogcio                       # 6 repos, includes 2 large forks
+          - Teagasc                     # 7 repos
+          - HSEIreland                  # 15 repos, all archived upstream
+          - Oireachtas                  # 18 repos
+          - CSOIreland                  # 35 repos, includes the 4.4 GiB outlier
+          - IrishMarineInstitute        # 100 repos
+      dry_run:
+        description: "List what would be created, create nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backfill-${{ inputs.org }}
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: git lfs install --skip-smudge
+
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ vars.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Plan
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          python scripts/enumerate.py --org "${{ inputs.org }}" \
+            --emit-changed --force-all > worklist.tsv
+          echo "### Backfill plan: ${{ inputs.org }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat worklist.tsv >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Backfill
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MIRROR_ORG: ${{ github.repository_owner }}
+          WORKDIR: ${{ runner.temp }}/work
+        run: |
+          set -uo pipefail
+          mkdir -p "$WORKDIR"
+          while IFS=$'\t' read -r clone_url mirror_name default_branch; do
+            [ -z "${clone_url:-}" ] && continue
+            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" \
+              || echo "::error::backfill failed for $mirror_name"
+            rm -rf "$WORKDIR"/* || true
+            # Repository creation is capped at 500 content-generating requests
+            # per hour. Pacing here keeps a 100-repo namespace inside one hour.
+            sleep 3
+          done < worklist.tsv
+
+      - name: Record results
+        if: ${{ always() && inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          python scripts/enumerate.py --org "${{ inputs.org }}" --update-manifest
+          git config user.name "ie-gov-mirror bot"
+          git config user.email "noreply@github.com"
+          git add manifest/
+          git diff --quiet --cached || \
+            git commit -m "Backfill ${{ inputs.org }}: record mirrored repositories"
+          git push origin HEAD:"${{ github.ref_name }}" || true

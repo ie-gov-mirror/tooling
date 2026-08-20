@@ -1,0 +1,113 @@
+name: sync mirrors
+
+# Weekly incremental refresh, sharded by upstream namespace. Gated on
+# upstream pushed_at, so a typical run re-clones a handful of repositories
+# rather than the whole 11.5 GiB.
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: "Re-sync every repository, ignoring pushed_at gating"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Six hours is the hard Actions job ceiling. The largest shard
+    # (CSOIreland, ~6 GiB dominated by one 4.4 GiB repo) sits well inside it.
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      # Three at a time keeps well clear of the 80 content-generating
+      # requests/minute secondary limit and stays polite to upstream.
+      max-parallel: 3
+      matrix:
+        org:
+          - CSOIreland
+          - Geological-Survey-Ireland
+          - HSEIreland
+          - IrishMarineInstitute
+          - MetEireann
+          - Oireachtas
+          - Teagasc
+          - ogcio
+          - revenue-ie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git and LFS
+        run: |
+          git lfs install --skip-smudge
+          git config --global advice.detachedHead false
+
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ vars.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Sync shard
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MIRROR_ORG: ${{ github.repository_owner }}
+          WORKDIR: ${{ runner.temp }}/work
+        run: |
+          set -uo pipefail
+          mkdir -p "$WORKDIR"
+          FORCE=""
+          [ "${{ inputs.force_all }}" = "true" ] && FORCE="--force-all"
+
+          python scripts/enumerate.py --org "${{ matrix.org }}" \
+            --emit-changed $FORCE > worklist.tsv || true
+          echo "$(wc -l < worklist.tsv) repositories to sync"
+
+          FAILED=0
+          while IFS=$'\t' read -r clone_url mirror_name default_branch; do
+            [ -z "${clone_url:-}" ] && continue
+            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch"
+            rc=$?
+            case "$rc" in
+              0) ;;
+              3) # upstream unreachable: preserve the mirror, record a tombstone
+                 python scripts/tombstone.py \
+                   --check "$(echo "$clone_url" | sed -E 's#https://github.com/(.*)\.git#\1#')" ;;
+              *) echo "::error::sync failed for $mirror_name (exit $rc)"
+                 FAILED=$((FAILED + 1)) ;;
+            esac
+            # Reclaim runner disk: ~14 GB available, largest repo is 4.4 GB.
+            rm -rf "$WORKDIR"/* || true
+          done < worklist.tsv
+
+          echo "failed=$FAILED" >> "$GITHUB_STEP_SUMMARY"
+          [ "$FAILED" -gt 0 ] && exit 1 || exit 0
+
+      - name: Record sync results in manifest
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python scripts/enumerate.py --org "${{ matrix.org }}" --update-manifest
+
+      - name: Commit manifest
+        if: always()
+        run: |
+          # The manifest is the provenance record: `git log manifest/core.csv`
+          # is the audit trail of first_seen / last_seen / last_synced.
+          git config user.name "ie-gov-mirror bot"
+          git config user.email "noreply@github.com"
+          git add manifest/
+          git diff --quiet --cached || \
+            git commit -m "Sync ${{ matrix.org }}: update manifest timestamps"
+          git pull --rebase --autostash origin "${{ github.ref_name }}" || true
+          git push origin HEAD:"${{ github.ref_name }}" || true

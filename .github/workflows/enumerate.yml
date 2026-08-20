@@ -1,0 +1,64 @@
+name: enumerate upstream
+
+# Re-enumerates the nine verified namespaces through the API rather than
+# trusting the static research snapshot. ~13 API calls, so it runs daily.
+# It never mirrors anything: new repositories land as a manifest PR for a
+# human to approve, and disappearances go to the tombstone flow.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: enumerate
+  cancel-in-progress: false
+
+jobs:
+  enumerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ vars.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Drift report
+        id: drift
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        # enumerate.py exits non-zero when there is drift needing attention,
+        # which is information, not failure.
+        run: python scripts/enumerate.py --report | tee drift.txt || true
+
+      - name: Update manifest
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python scripts/enumerate.py --update-manifest
+
+      - name: Check for vanished upstreams
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MIRROR_ORG: ${{ github.repository_owner }}
+        run: python scripts/tombstone.py --check-all
+
+      - name: Open manifest PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ steps.app.outputs.token }}
+          branch: bot/manifest-drift
+          commit-message: "Update manifest from upstream enumeration"
+          title: "Manifest drift from upstream enumeration"
+          body-path: drift.txt
+          labels: manifest
+          # A human merges this. New repositories are never mirrored on the
+          # strength of a name alone; ownership has to be reviewed first.

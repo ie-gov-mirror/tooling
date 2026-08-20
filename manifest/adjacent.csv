@@ -1,0 +1,2 @@
+upstream,mirror_name,tier,public_body,ownership_confidence,default_branch,upstream_archived,size_kb,clone_url,web_url,first_seen,last_seen,last_synced,upstream_pushed_at,status,lfs,fidelity_notes,evidence_url
+legalize-dev/legalize-ie,legalize-dev.legalize-ie,adjacent,Independent legislation mirror,none,main,false,60410,https://github.com/legalize-dev/legalize-ie.git,https://github.com/legalize-dev/legalize-ie,2026-08-11,2026-08-11,,,never-sync,unknown,,https://github.com/legalize-dev/legalize-ie
