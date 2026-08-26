@@ -25,9 +25,13 @@ MIRROR_ORG="${MIRROR_ORG:?MIRROR_ORG required}"
 WORKDIR="${WORKDIR:-$(mktemp -d)}/${MIRROR_NAME}.git"
 
 # GitHub rejects packs larger than ~2GB in a single push, so oversized repos are
-# backfilled in history slices. Commits per slice on the chunked path.
-CHUNK_COMMITS="${CHUNK_COMMITS:-2000}"
-CHUNK_THRESHOLD_KB="${CHUNK_THRESHOLD_KB:-1500000}"
+# backfilled in history slices. The slice count is derived from repository SIZE,
+# not from a fixed commit count: a fixed count is wrong in both directions - a
+# repo with fewer commits than the step gets no slices at all (which is how a
+# 4.3GB repo with 71 commits went out as one pack and got HTTP 500), and a repo
+# with huge blobs in few commits needs finer slicing than commit count implies.
+CHUNK_THRESHOLD_KB="${CHUNK_THRESHOLD_KB:-1500000}"   # chunk above ~1.5 GiB
+CHUNK_TARGET_KB="${CHUNK_TARGET_KB:-400000}"          # aim ~400 MiB per push
 
 note() { printf '%s %s\n' "[$MIRROR_NAME]" "$*" >&2; }
 fail() { note "FAILED: $*"; exit 1; }
@@ -120,18 +124,52 @@ push_all() {
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
 }
 
+# Walk one branch's history, pushing progressively to a scratch ref so each
+# push carries a bounded slice of new objects. Returns non-zero on failure.
+chunked_push_ref() {
+  local ref="$1" list total slices step n sha
+  list=$(mktemp "${TMPDIR:-/tmp}/chunklist.XXXXXX")
+  git rev-list --reverse "$ref" > "$list" || return 1
+  total=$(wc -l < "$list" | tr -d ' ')
+  [ "${total:-0}" -eq 0 ] && return 0
+
+  # One slice per CHUNK_TARGET_KB of repository, capped at one slice per commit.
+  slices=$(( REPO_KB / CHUNK_TARGET_KB + 1 ))
+  [ "$slices" -gt "$total" ] && slices="$total"
+  [ "$slices" -lt 1 ] && slices=1
+  step=$(( (total + slices - 1) / slices ))
+  [ "$step" -lt 1 ] && step=1
+  note "chunking ${ref#refs/heads/}: $total commits in ~$slices slices of $step"
+
+  n=0
+  while [ "$n" -lt "$total" ]; do
+    n=$(( n + step ))
+    [ "$n" -gt "$total" ] && n="$total"
+    sha=$(sed -n "${n}p" "$list")
+    if ! git push --quiet --force "$MIRROR_PUSH_URL" "${sha}:refs/heads/__backfill"; then
+      # A slice still too large for one pack: halve the step and retry from
+      # the last known-good point rather than giving up on the repository.
+      if [ "$step" -gt 1 ]; then
+        n=$(( n - step )); step=$(( step / 2 )); [ "$step" -lt 1 ] && step=1
+        note "slice too large, retrying with step $step"
+        continue
+      fi
+      note "single-commit push failed at $n/$total ($sha)"
+      rm -f "$list"; return 1
+    fi
+  done
+  rm -f "$list"
+  return 0
+}
+
 REPO_KB=$(du -sk . | cut -f1)
 if [ "$REPO_KB" -gt "$CHUNK_THRESHOLD_KB" ]; then
-  # Oversized first backfill: walk each branch's history in slices so no single
-  # pack approaches the ~2GB ceiling. Subsequent syncs take the normal path
-  # because the objects are already on the remote.
+  # Oversized first backfill: get the objects onto the remote in bounded packs
+  # first, so the real ref push below sends almost nothing. Later syncs take the
+  # normal path because the objects are already there.
   note "large repo (${REPO_KB} KB) - chunked backfill"
   for ref in $(git for-each-ref --format='%(refname)' refs/heads); do
-    git rev-list --reverse "$ref" | awk -v n="$CHUNK_COMMITS" 'NR % n == 0' \
-      | while read -r sha; do
-          git push --quiet --force "$MIRROR_PUSH_URL" "${sha}:refs/heads/__backfill" \
-            || fail "chunked push failed at $sha on $ref"
-        done
+    chunked_push_ref "$ref" || fail "chunked push failed on $ref"
   done
   git push --quiet --delete "$MIRROR_PUSH_URL" refs/heads/__backfill 2>/dev/null || true
 fi
