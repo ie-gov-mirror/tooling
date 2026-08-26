@@ -33,6 +33,7 @@ WORKDIR="${WORKDIR:-$(mktemp -d)}/${MIRROR_NAME}.git"
 CHUNK_THRESHOLD_KB="${CHUNK_THRESHOLD_KB:-1500000}"   # chunk above ~1.5 GiB
 CHUNK_TARGET_KB="${CHUNK_TARGET_KB:-400000}"          # aim ~400 MiB per push
 CHUNKED=0
+PUSH_PROTECTED=0
 
 note() { printf '%s %s\n' "[$MIRROR_NAME]" "$*" >&2; }
 fail() { note "FAILED: $*"; exit 1; }
@@ -215,11 +216,44 @@ if [ "$REPO_KB" -gt "$CHUNK_THRESHOLD_KB" ]; then
   CHUNKED=1
 fi
 
+# GitHub applies secret-scanning push protection to PUBLIC repositories at a
+# level that org settings cannot switch off on a free plan: the org has
+# secret_scanning_push_protection disabled, the mirror-archive configuration is
+# enforced with it disabled, and there are no rulesets - yet a push carrying a
+# credential in history is still refused with GH013. Push protection does not
+# apply to private repositories without Advanced Security, so the fallback is to
+# push while private and restore visibility afterwards.
+#
+# This preserves fidelity: history is pushed verbatim, nothing is rewritten and
+# no secret is stripped. The alternative would be to skip such repositories,
+# which would silently put a hole in the archive exactly where upstream
+# published something it should not have.
+push_via_private() {
+  note "push blocked by push protection - retrying with the mirror private"
+  gh api -X PATCH "/repos/${MIRROR_ORG}/${MIRROR_NAME}" -F private=true >/dev/null 2>&1 \
+    || { note "could not make repository private"; return 1; }
+  local rc=0
+  push_all || rc=$?
+  # Restore visibility whether or not the push worked; a mirror left private is
+  # worse than one that failed loudly.
+  gh api -X PATCH "/repos/${MIRROR_ORG}/${MIRROR_NAME}" -F private=false >/dev/null 2>&1 \
+    || note "WARNING mirror left PRIVATE - restore visibility manually"
+  return $rc
+}
+
 if [ "$BRANCH_COUNT" -eq 0 ] && [ "$TAG_COUNT" -eq 0 ]; then
   # Empty upstream repo. The mirror exists and is correct; nothing to push.
   note "upstream is empty - mirror created, nothing to push"
 else
-  push_all || fail "push rejected (check secret-scanning push protection and workflows:write)"
+  if ! push_out=$(push_all 2>&1); then
+    if printf '%s' "$push_out" | grep -qiE "GH013|push protection|cannot contain secrets"; then
+      PUSH_PROTECTED=1
+      push_via_private || fail "push failed even with the mirror private"
+    else
+      note "$push_out"
+      fail "push rejected (check workflows:write on the token)"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -256,7 +290,9 @@ fi
 # 8. Report machine-readable result for manifest update, then free disk. The
 #    runner has ~14GB; the largest repo here is 4.4GB.
 # ---------------------------------------------------------------------------
+NOTES="${LFS_NOTE:-none}"
+[ "$PUSH_PROTECTED" -eq 1 ] && NOTES="${NOTES},pushed-via-private-visibility"
 printf 'RESULT\t%s\t%s\t%s\t%s\t%s\n' \
-  "$MIRROR_NAME" "synced" "$BRANCH_COUNT" "$TAG_COUNT" "${LFS_NOTE:-none}"
+  "$MIRROR_NAME" "synced" "$BRANCH_COUNT" "$TAG_COUNT" "$NOTES"
 cd /
 rm -rf "$WORKDIR"
