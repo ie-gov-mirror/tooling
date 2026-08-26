@@ -9,8 +9,14 @@ For each manifest row it fetches GET /repos/{repo}/git/refs from both sides and
 compares the full {ref: sha} mapping, so a missing branch, a missing tag or a
 stale head is caught rather than just a differing default branch.
 
-refs/pull/* is excluded on both sides: GitHub does not return hidden refs here,
-and the sync deliberately strips them because pushes to them are rejected.
+refs/pull/* is excluded on both sides. Note that this endpoint DOES return
+them - a repository with many pull requests can have hundreds - and the sync
+deliberately strips them because GitHub rejects pushes to hidden refs.
+
+All pages are fetched. This matters more than it looks: refs sort as
+heads < pull < tags, so on a repository with over 100 refs the tags land on a
+later page. Comparing only the first page silently skips tag verification and
+reports spurious "extra" refs on the mirror side.
 
 Usage:
   verify_mirrors.py                    # verify every mirrored row
@@ -36,7 +42,7 @@ API = "https://api.github.com"
 
 
 def get(path):
-    req = urllib.request.Request(f"{API}{path}")
+    req = urllib.request.Request(path if path.startswith("http") else f"{API}{path}")
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     token = os.environ.get("GH_TOKEN", "")
@@ -44,27 +50,40 @@ def get(path):
         req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp), resp.status
+            return json.load(resp), resp.status, resp.headers.get("Link", "")
     except urllib.error.HTTPError as exc:
-        return None, exc.code
+        return None, exc.code, ""
     except Exception:
-        return None, 0
+        return None, 0, ""
+
+
+def get_all(path):
+    """Every page of a paginated list endpoint."""
+    out, url = [], path
+    while url:
+        data, status, link = get(url)
+        if data is None:
+            return None, status
+        out.extend(data if isinstance(data, list) else [data])
+        url = ""
+        for part in link.split(","):
+            if 'rel="next"' in part:
+                url = part.split(";")[0].strip().strip("<>")
+    return out, 200
 
 
 def ref_map(full_name):
     """{refname: sha} for a repository, or (None, status) on failure."""
-    data, status = get(f"/repos/{full_name}/git/refs?per_page=100")
+    data, status = get_all(f"/repos/{full_name}/git/refs?per_page=100")
     if data is None:
         # 409 means an empty repository: no refs, which is a valid state.
         return ({}, status) if status == 409 else (None, status)
-    if isinstance(data, dict):
-        data = [data]
     return ({r["ref"]: r["object"]["sha"] for r in data
              if not r["ref"].startswith("refs/pull/")}, status)
 
 
 def uses_lfs(full_name):
-    data, _ = get(f"/repos/{full_name}/contents/.gitattributes")
+    data, _, _ = get(f"/repos/{full_name}/contents/.gitattributes")
     if not data or "content" not in data:
         return False
     import base64
