@@ -187,12 +187,40 @@ def main():
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--emit-changed", action="store_true")
     ap.add_argument("--update-manifest", action="store_true")
+    ap.add_argument("--mark-synced", metavar="FILE",
+                    help="file of mirror names (one per line) that synced "
+                         "successfully; stamps last_synced and status=active")
     ap.add_argument("--list-namespaces", action="store_true")
     ap.add_argument("--force-all", action="store_true",
                     help="emit every repo, not just those pushed since last sync")
     args = ap.parse_args()
 
     tiers = load_all()
+
+    # Stamping last_synced is what makes the weekly refresh incremental: the
+    # sync gate compares upstream pushed_at against it, so without this every
+    # run would re-clone every repository.
+    if args.mark_synced:
+        today = date.today().isoformat()
+        wanted = {line.strip() for line in open(args.mark_synced) if line.strip()}
+        stamped = 0
+        for filename, (rows, fields) in tiers.items():
+            dirty = False
+            for row in rows:
+                if row["mirror_name"] in wanted:
+                    row["last_synced"] = today
+                    row["status"] = "active"
+                    dirty = True
+                    stamped += 1
+            if dirty:
+                write_tier(filename, rows, fields)
+        print(f"stamped last_synced on {stamped} rows", file=sys.stderr)
+        missing = wanted - {r["mirror_name"] for rs, _ in tiers.values() for r in rs}
+        if missing:
+            print(f"warning: {len(missing)} names not in manifest: "
+                  f"{sorted(missing)[:5]}", file=sys.stderr)
+        if not args.report and not args.emit_changed and not args.update_manifest:
+            return 0
 
     if args.list_namespaces:
         for ns in namespaces(tiers):

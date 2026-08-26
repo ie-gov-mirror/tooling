@@ -70,10 +70,12 @@ jobs:
           echo "$(wc -l < worklist.tsv) repositories to sync"
 
           FAILED=0
+          : > synced.txt
           while IFS=$'\t' read -r clone_url mirror_name default_branch tier; do
             [ -z "${clone_url:-}" ] && continue
             scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"
             rc=$?
+            [ "$rc" -eq 0 ] && echo "$mirror_name" >> synced.txt
             case "$rc" in
               0) ;;
               3) # upstream unreachable: preserve the mirror, record a tombstone
@@ -93,7 +95,10 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
-        run: python scripts/enumerate.py --ns "${{ matrix.org }}" --update-manifest
+        run: |
+          python scripts/enumerate.py --ns "${{ matrix.org }}" --update-manifest
+          # Stamps last_synced, which is what makes the next run incremental.
+          [ -s synced.txt ] && python scripts/enumerate.py --mark-synced synced.txt || true
 
       - name: Commit manifest
         if: always()

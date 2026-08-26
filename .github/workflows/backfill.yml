@@ -66,10 +66,14 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p "$WORKDIR"
+          : > synced.txt
           while IFS=$'\t' read -r clone_url mirror_name default_branch tier; do
             [ -z "${clone_url:-}" ] && continue
-            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier" \
-              || echo "::error::backfill failed for $mirror_name"
+            if scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"; then
+              echo "$mirror_name" >> synced.txt
+            else
+              echo "::error::backfill failed for $mirror_name"
+            fi
             rm -rf "$WORKDIR"/* || true
             # Repository creation is capped at 500 content-generating requests
             # per hour. Pacing here keeps a 100-repo namespace inside one hour.
@@ -82,6 +86,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
         run: |
           python scripts/enumerate.py --ns "${{ inputs.org }}" --update-manifest
+          [ -s synced.txt ] && python scripts/enumerate.py --mark-synced synced.txt || true
           git config user.name "ie-gov-mirror bot"
           git config user.email "noreply@github.com"
           git add manifest/
