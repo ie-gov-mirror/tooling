@@ -3,7 +3,8 @@
 Mirroring Irish public-sector GitHub repositories, modelled on
 [uk-gov-mirror](https://github.com/uk-gov-mirror).
 
-**Status:** plan, not yet executed. Nothing has been mirrored.
+**Status:** Phase 0 complete, backfill in progress — **149 of 209 mirrored**
+and verified byte-identical, 60 pending (see §7).
 **Source data:** research snapshot of 11 August 2026 (`docs/source-research-2026-08-11.md`).
 **Control repo:** `ie-gov-mirror/tooling` (this repo).
 
@@ -477,3 +478,88 @@ Verified: [uk-gov-mirror org](https://github.com/uk-gov-mirror) ·
 branch-fidelity spot check: [mirror branches](https://github.com/uk-gov-mirror/nhs-england-tools.github-runner-image/branches/all) against a deleted upstream.
 
 Inventory figures computed from `manifest/inventory-2026-08-11.csv`.
+
+
+---
+
+## 7. Execution record
+
+### Phase 0 — complete (26 August 2026)
+
+| Item | State |
+|---|---|
+| Org description | Set, carrying the unofficial/preservation disclaimer |
+| `.github` profile | Created: disclaimer, scope, what is *not* mirrored, contact address. Issues/wiki/projects off |
+| Actions | `enabled_repositories: selected` — **only `tooling`**. Verified a newly created repo is not auto-added |
+| Code security | `mirror-archive` configuration: secret scanning, push protection, Dependabot and dependency graph all disabled. `default_for_new_repos: all`, attached to all existing. Confirmed `status: enforced` on new mirrors |
+| Base member permission | `read` |
+| `MIRROR_TOKEN` | Org secret, `visibility: selected` → `tooling` only |
+| 2FA requirement | **Not set** — read-only in the API, must be done in the web UI |
+| Pages | Not disabled org-wide: that control is Enterprise-only. Mirrors never enable Pages, so the per-repo default of off applies |
+
+### Phase 2 — representative cases, all passed
+
+| Case | Repository | Outcome |
+|---|---|---|
+| Extended tier labelling | `derilinx.ckanext-dgi-public` | HEAD identical; `not-government-owned` topic and caveat in description |
+| Default branch not `main` | `ogcio.wagtail-sitemap-seo` | `default_branch: fix/http-sitemap` set correctly |
+| Archived upstream | `HSEIreland.covid-tracker-app` | Mirrored unarchived, as designed |
+| Minimal repository | `MetEireann.GitTest` | Clean |
+| Oversized, chunked push | `CSOIreland.edprofiles` (4.44 GiB) | **Failed first**, see below. Now correct: `main`, `pdf`, `resources` and all three tags match upstream |
+
+### Bugs found by running it
+
+Every one of these needed a real repository of a particular shape; none would
+have appeared in a dry run.
+
+1. **`sha_pinning_required`** is enabled on the org, so `actions/checkout@v4`
+   would have been rejected at first run. Now pinned to a commit SHA.
+2. **`last_synced` was never written** — read in one place, set in none. The
+   weekly sync's `pushed_at` gate could never engage, so every run would have
+   re-cloned all 209 repositories (~11.5 GiB) indefinitely. Added
+   `--mark-synced`.
+3. **Chunked push sliced by commit count.** `edprofiles` has only 71 commits on
+   `main`, so `awk 'NR % 2000 == 0'` emitted nothing, no slices were pushed,
+   and the whole 4.3 GiB went out as one pack → `HTTP 500`. Slices are now
+   derived from repository size.
+4. **Scratch ref deleted before the default branch was set.** On a fresh
+   repository `__backfill` is the first ref pushed, so GitHub makes it the
+   default branch — and a default branch cannot be deleted. The cleanup failed
+   silently on every chunked mirror. Deletion now happens after the real
+   default branch is set.
+5. **Repository-creation throttle unhandled.** See below.
+6. **The verifier did not paginate `/git/refs`.** Refs sort
+   `heads < pull < tags`, and this endpoint *does* return `refs/pull`, so on a
+   repository with over 100 refs the tags sat on a later page and were never
+   compared. Tag verification was silently skipped.
+
+### The repository-creation rate limit
+
+The backfill was blocked after **~149 creations in under an hour**:
+
+> You have created too many repositories, too quickly.
+
+The important detail is that `/rate_limit` reported **5000/5000 remaining on
+both `core` and `graphql`** throughout. This limit is invisible there and
+cannot be predicted — only observed by being refused. The documented 500
+content-generating requests per hour was never the binding constraint.
+
+`sync_repo.sh` now backs off (60s doubling to a 30-minute ceiling) and returns
+exit 4 so a throttled repository is deferred rather than dropped. Repeated
+creation attempts while blocked can *extend* the limit, so probing is
+deliberately infrequent. **Budget ~150 creations per hour**: a full 209-repo
+backfill is a two-session job.
+
+### Fidelity
+
+`scripts/verify_mirrors.py` compares the complete `{ref: sha}` mapping on both
+sides of every manifest row, because exit codes proved untrustworthy twice — a
+push printed `[remote rejected]` on every ref while the refs had in fact
+landed, and a background wrapper reported exit 0 for a script that exited 1.
+
+Latest sweep: **149 mirrored, all byte-identical across every branch and tag.
+Zero mismatches.** 60 pending.
+
+**Git LFS:** all 209 upstreams checked. Twenty have a root `.gitattributes`
+and none uses `filter=lfs`, so no mirror depends on the LFS path. This covers
+root `.gitattributes` only; LFS configured in a subdirectory would be missed.

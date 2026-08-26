@@ -8,10 +8,10 @@ made private upstream stays available.
 source for every mirrored repository is its upstream, linked from each mirror's
 homepage field.
 
-> **Status: nothing has been mirrored yet.** This repo currently holds the
-> plan, the tooling and the inventory. All fourteen design decisions are
-> settled — see [`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md). What
-> remains before backfill is Phase 0: org settings and the access token.
+> **Status: 149 of 209 mirrored**, all verified byte-identical to upstream
+> across every branch and tag. 60 pending, waiting on GitHub's
+> repository-creation rate limit. Org setup is complete. See the execution
+> record in [`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md#7-execution-record).
 
 ## Scope
 
