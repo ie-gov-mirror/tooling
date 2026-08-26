@@ -80,15 +80,51 @@ else
   TOPICS="mirror,unofficial"
 fi
 
+# Repository creation is governed by an undocumented secondary rate limit that
+# is much tighter than the 500 content-generating requests/hour in the docs: a
+# backfill creating ~150 repositories in under an hour was blocked with "You
+# have created too many repositories, too quickly". The limit is not reported in
+# /rate_limit (primary quota stays full), so it can only be discovered by being
+# refused. Back off and wait it out rather than dropping the repository.
+create_repo_with_backoff() {
+  local attempt=0 wait=60 out
+  while :; do
+    if out=$(gh repo create "${MIRROR_ORG}/${MIRROR_NAME}" --public \
+               --description "$DESCRIPTION" \
+               --homepage "https://github.com/${UPSTREAM_SLUG}" \
+               --disable-issues --disable-wiki 2>&1); then
+      return 0
+    fi
+    # Another shard may have created it between the check and here.
+    if printf '%s' "$out" | grep -qi "name already exists"; then
+      note "repository already exists, continuing"
+      return 0
+    fi
+    if ! printf '%s' "$out" | grep -qiE "too many repositories|secondary rate limit|abuse detection"; then
+      note "$out"
+      return 1   # a real error, not throttling
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -gt "${CREATE_MAX_ATTEMPTS:-6}" ]; then
+      note "still rate limited after $attempt attempts, giving up on this repo"
+      return 2
+    fi
+    note "creation rate limited, waiting ${wait}s (attempt $attempt)"
+    sleep "$wait"
+    wait=$(( wait * 2 ))
+    [ "$wait" -gt 1800 ] && wait=1800
+  done
+}
+
 if ! gh repo view "${MIRROR_ORG}/${MIRROR_NAME}" >/dev/null 2>&1; then
   note "creating ${MIRROR_ORG}/${MIRROR_NAME} (tier=$TIER)"
-  gh repo create "${MIRROR_ORG}/${MIRROR_NAME}" --public \
-    --description "$DESCRIPTION" \
-    --homepage "https://github.com/${UPSTREAM_SLUG}" \
-    --disable-issues --disable-wiki >/dev/null || fail "repo creation failed"
-  # Pace repo creation: the secondary rate limit is 80 content-generating
-  # requests/minute and 500/hour.
-  sleep 2
+  create_repo_with_backoff
+  case $? in
+    0) ;;
+    2) exit 4 ;;   # exit 4 == throttled, retry this repo in a later run
+    *) fail "repo creation failed" ;;
+  esac
+  sleep "${CREATE_PACE_SECONDS:-2}"
 fi
 
 # Topics are metadata, never contents - the fidelity contract is untouched.

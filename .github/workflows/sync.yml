@@ -69,7 +69,7 @@ jobs:
             --emit-changed $FORCE > worklist.tsv || true
           echo "$(wc -l < worklist.tsv) repositories to sync"
 
-          FAILED=0
+          FAILED=0; THROTTLED=0
           : > synced.txt
           while IFS=$'\t' read -r clone_url mirror_name default_branch tier; do
             [ -z "${clone_url:-}" ] && continue
@@ -81,6 +81,9 @@ jobs:
               3) # upstream unreachable: preserve the mirror, record a tombstone
                  python scripts/tombstone.py \
                    --check "$(echo "$clone_url" | sed -E 's#https://github.com/(.*)\.git#\1#')" ;;
+              4) # creation secondary rate limit: not a fault, retry next run
+                 echo "::warning::$mirror_name deferred - repo creation throttled"
+                 THROTTLED=$((THROTTLED + 1)) ;;
               *) echo "::error::sync failed for $mirror_name (exit $rc)"
                  FAILED=$((FAILED + 1)) ;;
             esac
@@ -88,7 +91,7 @@ jobs:
             rm -rf "$WORKDIR"/* || true
           done < worklist.tsv
 
-          echo "failed=$FAILED" >> "$GITHUB_STEP_SUMMARY"
+          echo "failed=$FAILED throttled=$THROTTLED" >> "$GITHUB_STEP_SUMMARY"
           [ "$FAILED" -gt 0 ] && exit 1 || exit 0
 
       - name: Record sync results in manifest

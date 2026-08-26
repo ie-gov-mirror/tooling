@@ -69,15 +69,19 @@ jobs:
           : > synced.txt
           while IFS=$'\t' read -r clone_url mirror_name default_branch tier; do
             [ -z "${clone_url:-}" ] && continue
-            if scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"; then
-              echo "$mirror_name" >> synced.txt
-            else
-              echo "::error::backfill failed for $mirror_name"
-            fi
+            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"
+            case $? in
+              0) echo "$mirror_name" >> synced.txt ;;
+              4) echo "::warning::$mirror_name deferred - repo creation throttled" ;;
+              *) echo "::error::backfill failed for $mirror_name" ;;
+            esac
             rm -rf "$WORKDIR"/* || true
-            # Repository creation is capped at 500 content-generating requests
-            # per hour. Pacing here keeps a 100-repo namespace inside one hour.
-            sleep 3
+            # The real constraint is an undocumented secondary limit on
+            # repository creation, hit after ~150 creations in under an hour.
+            # sync_repo.sh backs off on its own; this just keeps the steady
+            # rate below the threshold. Raise CREATE_PACE_SECONDS if a large
+            # namespace still trips it.
+            sleep "${CREATE_PACE_SECONDS:-20}"
           done < worklist.tsv
 
       - name: Record results

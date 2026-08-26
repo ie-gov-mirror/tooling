@@ -204,9 +204,16 @@ throughput — so it is not on the critical path.
 primary 5,000/hr (PAT) or up to 12,500/hr (App); secondary **80
 content-generating requests/minute** and **500/hour**; 100 concurrent.
 
-- **191 repo creations** fit inside one hour's 500-create budget, but must be
-  paced (~1 per 3 s) to stay under 80/min. The backfill workflow sleeps
-  accordingly.
+- **Repository creation has a tighter, undocumented secondary limit than the
+  published 500/hour**, and this was hit for real: a backfill that created
+  ~149 repositories in under an hour was blocked with *"You have created too
+  many repositories, too quickly"*. Critically, `/rate_limit` still reported
+  **5000/5000 on both core and graphql** — the creation limit is invisible
+  there, so it can only be discovered by being refused. `sync_repo.sh` now
+  backs off (60s doubling to 30 min) and returns exit 4 so the repository is
+  deferred rather than dropped; `backfill.yml` paces at
+  `CREATE_PACE_SECONDS` (default 20s). Budget roughly **150 creations per
+  hour**, so a full 209-repo backfill is a two-session job.
 - **Enumeration** is ~13 requests per crawl across 9 orgs. Trivial; runs daily.
 - **Weekly refresh** is gated on `pushed_at`, so a typical week re-clones a
   handful of repos, not 11.5 GiB.
