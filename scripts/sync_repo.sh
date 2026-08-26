@@ -32,6 +32,7 @@ WORKDIR="${WORKDIR:-$(mktemp -d)}/${MIRROR_NAME}.git"
 # with huge blobs in few commits needs finer slicing than commit count implies.
 CHUNK_THRESHOLD_KB="${CHUNK_THRESHOLD_KB:-1500000}"   # chunk above ~1.5 GiB
 CHUNK_TARGET_KB="${CHUNK_TARGET_KB:-400000}"          # aim ~400 MiB per push
+CHUNKED=0
 
 note() { printf '%s %s\n' "[$MIRROR_NAME]" "$*" >&2; }
 fail() { note "FAILED: $*"; exit 1; }
@@ -171,7 +172,11 @@ if [ "$REPO_KB" -gt "$CHUNK_THRESHOLD_KB" ]; then
   for ref in $(git for-each-ref --format='%(refname)' refs/heads); do
     chunked_push_ref "$ref" || fail "chunked push failed on $ref"
   done
-  git push --quiet --delete "$MIRROR_PUSH_URL" refs/heads/__backfill 2>/dev/null || true
+  # The scratch ref is NOT deleted here. On a freshly created repository it is
+  # the first ref pushed, so GitHub makes it the default branch, and a default
+  # branch cannot be deleted ("refusing to delete the current branch"). It is
+  # removed after the real default branch is set, at the end of this script.
+  CHUNKED=1
 fi
 
 if [ "$BRANCH_COUNT" -eq 0 ] && [ "$TAG_COUNT" -eq 0 ]; then
@@ -201,7 +206,18 @@ if [ -n "$WANT_DEFAULT_BRANCH" ] && git show-ref --quiet "refs/heads/${WANT_DEFA
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Report machine-readable result for manifest update, then free disk. The
+# 7. Remove the chunked-backfill scratch ref, now that a real default branch is
+#    set and GitHub will allow it.
+# ---------------------------------------------------------------------------
+if [ "$CHUNKED" -eq 1 ]; then
+  if git ls-remote --exit-code --heads "$MIRROR_PUSH_URL" __backfill >/dev/null 2>&1; then
+    gh api -X DELETE "/repos/${MIRROR_ORG}/${MIRROR_NAME}/git/refs/heads/__backfill" \
+      >/dev/null 2>&1 || note "WARNING could not remove __backfill scratch ref"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Report machine-readable result for manifest update, then free disk. The
 #    runner has ~14GB; the largest repo here is 4.4GB.
 # ---------------------------------------------------------------------------
 printf 'RESULT\t%s\t%s\t%s\t%s\t%s\n' \
