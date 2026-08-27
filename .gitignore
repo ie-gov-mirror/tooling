@@ -1,0 +1,11 @@
+# Discovered-credential records. These name real exposed secrets in upstream
+# repositories and must never be committed to a public repository.
+FINDINGS-*.local.md
+findings/
+*.local.md
+
+# Local scratch
+worklist.tsv
+synced.txt
+*.pyc
+__pycache__/

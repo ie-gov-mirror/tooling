@@ -154,11 +154,21 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Push. Explicit refspecs, never `git push --mirror`: that would also delete
 #    refs absent locally, and would retry the hidden refs stripped above.
-#    --prune still removes branches and tags deleted upstream, which is correct
-#    for a live mirror; deletion of the whole upstream is handled by tombstones.
+#
+#    Deliberately NOT --prune. The archive exists to preserve what upstream
+#    removes, and that has to hold at ref level, not only whole-repository
+#    level. Pruning would make the mirror track upstream exactly and destroy
+#    branches and tags on the next sync after upstream deleted them - which is
+#    precisely the material worth keeping. Observed for real on
+#    HSEIreland/hse-healthapp-test-fhir-server, whose six dependabot branches
+#    the mirror captured and upstream has since removed.
+#
+#    The cost is accepted: mirrors accumulate refs upstream no longer has, so a
+#    mirror is a superset of its upstream rather than a copy. verify_mirrors.py
+#    reports that as ok-with-extra rather than a fault.
 # ---------------------------------------------------------------------------
 push_all() {
-  git push --quiet --prune "$MIRROR_PUSH_URL" \
+  git push --quiet "$MIRROR_PUSH_URL" \
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
 }
 

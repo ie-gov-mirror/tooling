@@ -135,8 +135,9 @@ must not be structurally coupled to upstream. Pushed clones are not.
 Implemented in `scripts/sync_repo.sh`. Five caveats it exists to handle:
 
 1. **Never `git push --mirror`.** It deletes any ref absent locally, and it
-   retries hidden refs. Use explicit refspecs with `--prune`:
+   retries hidden refs. Use explicit refspecs:
    `+refs/heads/*:refs/heads/*` and `+refs/tags/*:refs/tags/*`.
+   **Without `--prune`** — see §3.8.
 2. **Strip `refs/pull/*` first.** `git clone --mirror` fetches them; GitHub
    rejects pushes to them (*"deny updating a hidden ref"*) and one rejected
    ref aborts the push.
@@ -152,19 +153,52 @@ Implemented in `scripts/sync_repo.sh`. Five caveats it exists to handle:
 Exit code 3 means "upstream unreachable" and routes to the tombstone flow
 rather than counting as a failure.
 
+### 3.8 Refs deleted upstream are kept
+
+The push deliberately omits `--prune`, so a branch or tag deleted upstream
+stays in the mirror.
+
+This is the archive's whole purpose applied one level down. The org description
+promises to preserve repositories that are removed or made private; if a public
+body force-deletes a branch, pruning would destroy it on the next weekly sync,
+which is exactly the material most worth having. Whole-repository deletion is
+handled by tombstones (§3.3); ref-level deletion is handled here.
+
+Seen in practice on the very first sweep:
+`HSEIreland/hse-healthapp-test-fhir-server` is archived upstream and now has
+only `main`, but the mirror holds six `dependabot/*` branches captured before
+GitHub cleaned them up. Under `--prune` those would have been silently deleted
+on the following Monday.
+
+The cost, accepted deliberately: a mirror is a **superset** of its upstream, not
+a copy. Mirrors accumulate refs indefinitely, and a repository with heavy
+dependabot churn will grow branches that no longer exist anywhere else.
+`verify_mirrors.py` classifies this as `ok-with-extra` rather than a fault, so
+the condition stays visible rather than becoming invisible drift.
+
 ### 3.4 Two org settings that will bite if forgotten
 
 - **Disable Actions org-wide, allowlisting only this control repo.** Many
   mirrored repos contain `.github/workflows/*` with `on: push` or
   `on: schedule`. Without this, **mirrored third-party workflows execute in
   our org on every sync.** This is the single most dangerous default.
-- **Secret scanning: both push protection and alerts OFF.** Push protection
-  is on by default for public repos and **will block the backfill** the first
-  time upstream history contains anything matching a secret pattern; fidelity
-  requires pushing history verbatim, and these commits are already public
-  upstream. Alerts are off too, which means **no proactive signal for
-  credentials in mirrored history** — `POLICY.md` therefore commits only to a
-  reactive process: notify the upstream body if a credential is reported.
+- **Secret scanning: both push protection and alerts OFF** — but be clear that
+  **this does not actually stop push protection.** Disabling it org-wide was
+  expected to unblock the backfill. It does not: with
+  `secret_scanning_push_protection_enabled_for_new_repositories` false, the
+  `mirror-archive` configuration enforced with push protection disabled, and no
+  rulesets at all, GitHub still refused `ogcio/govie-messagingie` with `GH013`.
+  Push protection applies to **public** repositories at a level a free-plan
+  organisation cannot switch off; rulesets that might override it need a Team
+  plan. The working fallback is to push while the mirror is **private**, where
+  push protection does not apply without Advanced Security, then restore
+  visibility (`push_via_private` in `sync_repo.sh`).
+
+  Turning alerts off does have its intended effect: there is **no proactive
+  signal for credentials in mirrored history**, so `POLICY.md` commits only to
+  a reactive process. Note the irony that the one credential exposure found so
+  far was surfaced by the push protection that could not be disabled, not by
+  the scanning that was.
 
 The pushing token also needs **Workflows: write**, or any push touching a
 workflow file is rejected.
@@ -183,12 +217,16 @@ migrating to an org-owned GitHub App once backfill is done.
 | Token lifetime | months, manual rotation | minted per job, 1-hour expiry |
 | Ownership | tied to one person's account | owned by the org, survives people leaving |
 
-Permissions either way: **Administration: write** (create repos, set default
-branch, set topics, archive tombstones), **Contents: write**, **Workflows:
-write** (mandatory — pushes touching `.github/workflows/*` are rejected
-without it), **Metadata: read**. No `Pull requests` permission is required:
-new repositories in verified namespaces are auto-accepted and committed
-directly, so there is no review PR.
+The authoritative permission list lives in the
+[README](../README.md#the-token) so there is one place to look when the token
+needs replacing. In summary: repository **Administration**, **Contents** and
+**Workflows** at write, **Metadata** at read, plus organisation
+**Administration** and **Secrets** at write. No `Pull requests` permission is
+required, since new repositories are auto-accepted and committed directly.
+
+`Administration: write` covers more than repository creation — it is also what
+allows the visibility toggle that the push-protection workaround in §3.4
+depends on.
 
 The PAT's 5,000 req/hr is ample: backfill is ~209 repo creations plus a few
 hundred metadata calls. The reason to migrate is hygiene and continuity, not

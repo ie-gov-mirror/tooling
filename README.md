@@ -65,13 +65,53 @@ uk-gov-mirror's 26,416 repos), so the manifest is the inventory, not search.
 
 ## Running it
 
-Requires a fine-grained PAT stored as the `MIRROR_TOKEN` org secret, with
-**Administration: write** (create repos, set default branch and topics,
-archive tombstones), **Contents: write**, **Workflows: write** (mandatory —
-pushes touching `.github/workflows/*` are rejected without it) and
-**Metadata: read**. No `Pull requests` permission is needed — the bot commits
-manifest updates directly. Migrating to an org-owned GitHub App is planned
-after backfill.
+### The token
+
+Everything runs on one credential, stored as the **`MIRROR_TOKEN`** organisation
+secret (visibility: selected → `tooling` only).
+
+Create a **fine-grained personal access token** with:
+
+| Setting | Value |
+|---|---|
+| **Resource owner** | **`ie-gov-mirror`** — not your personal account |
+| **Repository access** | All repositories |
+
+**Repository permissions**
+
+| Permission | Level | Why |
+|---|---|---|
+| Administration | **Read and write** | Create repositories; set default branch, topics and homepage; archive tombstoned mirrors; **toggle visibility** for the push-protection workaround below |
+| Contents | **Read and write** | Push git objects, branches and tags |
+| Workflows | **Read and write** | Mandatory — any push touching `.github/workflows/*` is rejected without it, and many mirrored repositories contain workflow files |
+| Metadata | Read | Mandatory, auto-enabled |
+
+**Organisation permissions**
+
+| Permission | Level | Why |
+|---|---|---|
+| Administration | **Read and write** | Organisation profile, `default_repository_permission`, and the Actions policy |
+| Secrets | **Read and write** | Managing `MIRROR_TOKEN` itself |
+
+Not needed: **`Pull requests`** — new repositories in verified namespaces are
+auto-accepted and committed directly, so there is no review PR.
+
+Three things worth knowing before you create it:
+
+- **The organisation may need to approve the token.** If `ie-gov-mirror` has
+  personal-access-token restrictions enabled, a fine-grained token sits pending
+  until an owner approves it, and until then it returns 403 in a way
+  indistinguishable from a missing permission.
+- **`Administration: write` is load-bearing for more than repo creation.**
+  GitHub enforces secret-scanning push protection on public repositories at a
+  level a free-plan organisation cannot disable, so `sync_repo.sh` pushes such
+  repositories while private and restores visibility afterwards. That needs
+  visibility control.
+- **Actions' built-in `GITHUB_TOKEN` cannot substitute.** It is repository
+  scoped with no organisation administration, so it cannot create repositories.
+
+Migrating to an org-owned GitHub App is planned; see
+[`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md) §3.5 for the trade-off.
 
 ```bash
 # What has drifted from the manifest?

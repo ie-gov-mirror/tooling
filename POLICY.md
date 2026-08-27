@@ -101,6 +101,13 @@ these separately, and `docs/DELETED.md` lists them in their own section, so
 they are visible rather than buried among ordinary deletions. A human reviews
 before the mirror copy continues to be served.
 
+## Refs deleted upstream
+
+Branches and tags removed upstream are **kept**. The sync does not use
+`git push --prune`, so a mirror is a superset of its upstream rather than a
+copy. Preserving what upstream removes is the point of the archive, and that
+applies to a deleted branch as much as to a deleted repository.
+
 ## Tombstones
 
 Upstream disappearance never causes deletion. The mirror repository is
