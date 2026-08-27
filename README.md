@@ -85,6 +85,7 @@ Create a **fine-grained personal access token** with:
 | Contents | **Read and write** | Push git objects, branches and tags |
 | Workflows | **Read and write** | Mandatory — any push touching `.github/workflows/*` is rejected without it, and many mirrored repositories contain workflow files |
 | Metadata | Read | Mandatory, auto-enabled |
+| Actions | **Read and write** | Only if you want runs triggered via the API (`workflow_dispatch`, re-run). **Read alone is not enough** — dispatch returns `403 Resource not accessible by personal access token`. Not needed for the mirroring itself |
 
 **Organisation permissions**
 
