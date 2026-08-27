@@ -54,6 +54,13 @@ TIER_FILES = {
 # Namespaces tied to a named public body by the research snapshot. Adding one
 # here means "every public repo in this namespace is government code", which is
 # a deliberate, reviewable claim.
+#
+# Note that not all of these are Organizations. Geological-Survey-Ireland is a
+# User account - its profile carries the official gsi.ie domain and describes
+# the body, so it is no less verified, but /orgs/{name}/repos returns 404 for
+# it. Listing goes through /users/{name}/repos, which returns public
+# owner-held repositories for Users and Organizations alike (verified to give
+# identical counts to /orgs/{org}/repos?type=public on four organisations).
 DISCOVERY_NAMESPACES = [
     "CSOIreland",
     "Geological-Survey-Ireland",
@@ -108,9 +115,8 @@ def api_get(path, allow_missing=False):
             if exc.code == 404:
                 if allow_missing:
                     return None
-                raise SystemExit(
-                    f"HTTP 404 on {url} - namespace renamed or deleted?"
-                ) from None
+                print(f"HTTP 404 on {url}", file=sys.stderr)
+                return None
             raise
         out.extend(payload) if isinstance(payload, list) else out.append(payload)
         url = ""
@@ -230,15 +236,29 @@ def main():
     scope = args.ns or namespaces(tiers)
     live = {}          # upstream full_name -> API record
     new_upstream = []  # discovered, not yet in the manifest
+    unreachable = []   # namespaces that could not be listed at all
 
     # Discovery namespaces: enumerate wholesale.
     for ns in scope:
         if ns not in DISCOVERY_NAMESPACES:
             continue
-        repos = api_get(f"/orgs/{ns}/repos?per_page=100&type=public")
-        for repo in repos or []:
+        repos = api_get(f"/users/{ns}/repos?per_page=100&type=owner",
+                        allow_missing=True)
+        if repos is None:
+            # One renamed or deleted namespace must not abort the other eight.
+            print(f"{ns}: NOT FOUND - renamed, deleted, or no longer public. "
+                  f"Skipping; other namespaces continue.", file=sys.stderr)
+            unreachable.append(ns)
+            continue
+        # Defensive: never mirror a private repository even if the token can
+        # somehow see one. The archive is of published material only.
+        public = [r for r in repos if not r.get("private")]
+        skipped = len(repos) - len(public)
+        for repo in public:
             live[repo["full_name"]] = repo
-        print(f"{ns}: {len(repos or [])} public repos (enumerated)", file=sys.stderr)
+        note = f" ({skipped} non-public skipped)" if skipped else ""
+        print(f"{ns}: {len(public)} public repos (enumerated){note}",
+              file=sys.stderr)
 
     # Listed namespaces: fetch only the repositories the manifest names.
     listed = []
@@ -258,7 +278,12 @@ def main():
 
     in_scope = [r for rows, _ in tiers.values() for r in rows
                 if r["upstream"].split("/")[0] in scope]
-    gone = sorted(r["upstream"] for r in in_scope if r["upstream"] not in live)
+    # A repository is only a tombstone candidate if its namespace was actually
+    # listed. Without this guard, one unreachable namespace would report every
+    # repository in it as having disappeared upstream.
+    gone = sorted(r["upstream"] for r in in_scope
+                  if r["upstream"] not in live
+                  and r["upstream"].split("/")[0] not in unreachable)
 
     by_upstream = {r["upstream"]: r for rows, _ in tiers.values() for r in rows}
     changed = []
@@ -285,6 +310,11 @@ def main():
         print(f"disappeared upstream (tombstone candidates): {len(gone)}")
         for g in gone:
             print(f"  - {g}")
+        if unreachable:
+            print(f"NAMESPACES UNREACHABLE: {len(unreachable)}")
+            for ns in unreachable:
+                print(f"  ! {ns} - could not be listed; its repos were not "
+                      f"checked this run")
 
     if args.emit_changed:
         for upstream, mirror, branch, tier in changed:
@@ -346,7 +376,13 @@ def main():
             write_tier("core.csv", core_rows, core_fields)
         print(f"manifest updated ({added} new rows)", file=sys.stderr)
 
-    return 1 if (new_upstream or gone) else 0
+    # Unreachable namespaces are the serious case: repositories in them were
+    # not checked at all, so their absence from `live` must not be mistaken for
+    # upstream deletion.
+    if unreachable:
+        print(f"warning: {len(unreachable)} namespace(s) unreachable: "
+              f"{unreachable}", file=sys.stderr)
+    return 1 if (new_upstream or gone or unreachable) else 0
 
 
 if __name__ == "__main__":
