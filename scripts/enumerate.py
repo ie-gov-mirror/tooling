@@ -208,7 +208,13 @@ def main():
     # run would re-clone every repository.
     if args.mark_synced:
         today = date.today().isoformat()
-        wanted = {line.strip() for line in open(args.mark_synced) if line.strip()}
+        wanted = {}
+        for line in open(args.mark_synced):
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            wanted[parts[0].strip()] = parts[1].strip() if len(parts) > 1 else None
         stamped = 0
         for filename, (rows, fields) in tiers.items():
             dirty = False
@@ -216,6 +222,11 @@ def main():
                 if row["mirror_name"] in wanted:
                     row["last_synced"] = today
                     row["status"] = "active"
+                    # Fall back to the observed value when the caller supplied
+                    # no pushed_at, so older callers still advance the gate.
+                    stamp = wanted[row["mirror_name"]] or row.get("upstream_pushed_at", "")
+                    if "synced_pushed_at" in row:
+                        row["synced_pushed_at"] = stamp
                     dirty = True
                     stamped += 1
             if dirty:
@@ -292,12 +303,21 @@ def main():
         pushed = repo.get("pushed_at") or ""
         if row is None:
             changed.append((full_name, mirror_name(*full_name.split("/", 1)),
-                            repo.get("default_branch") or "", "core"))
+                            repo.get("default_branch") or "", "core", pushed))
+        # Compare against synced_pushed_at, NOT upstream_pushed_at.
+        # upstream_pushed_at records what enumeration last observed, and
+        # --update-manifest advances it every day. Gating on it meant the daily
+        # enumerate erased the very signal the weekly sync depends on: a
+        # repository pushed upstream between syncs had its watermark advanced
+        # before the sync ran, and became permanently invisible. Observed on
+        # ogcio/govie-ds, whose mirror sat a day stale while the manifest
+        # claimed it was current. synced_pushed_at only moves when a sync
+        # actually succeeded.
         elif (args.force_all or not row.get("last_synced")
-              or pushed > (row.get("upstream_pushed_at") or "")):
+              or pushed > (row.get("synced_pushed_at") or "")):
             changed.append((full_name, row["mirror_name"],
                             repo.get("default_branch") or row.get("default_branch") or "",
-                            row.get("tier") or "core"))
+                            row.get("tier") or "core", pushed))
 
     if args.report:
         print(f"namespaces in scope: {len(scope)}")
@@ -317,8 +337,11 @@ def main():
                       f"checked this run")
 
     if args.emit_changed:
-        for upstream, mirror, branch, tier in changed:
-            print(f"https://github.com/{upstream}.git\t{mirror}\t{branch}\t{tier}")
+        # Fifth field is the pushed_at observed BEFORE syncing. Stamping that
+        # value rather than a post-sync reading means an upstream push landing
+        # mid-sync stays visible to the next run.
+        for upstream, mirror, branch, tier, pushed in changed:
+            print(f"https://github.com/{upstream}.git\t{mirror}\t{branch}\t{tier}\t{pushed}")
 
     if args.update_manifest:
         today = date.today().isoformat()

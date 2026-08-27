@@ -71,11 +71,13 @@ jobs:
 
           FAILED=0; THROTTLED=0
           : > synced.txt
-          while IFS=$'\t' read -r clone_url mirror_name default_branch tier; do
+          while IFS=$'\t' read -r clone_url mirror_name default_branch tier pushed_at; do
             [ -z "${clone_url:-}" ] && continue
             scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"
             rc=$?
-            [ "$rc" -eq 0 ] && echo "$mirror_name" >> synced.txt
+            # Record the pre-sync pushed_at, so an upstream push landing during
+            # the sync is still seen by the next run.
+            [ "$rc" -eq 0 ] && printf '%s\t%s\n' "$mirror_name" "$pushed_at" >> synced.txt
             case "$rc" in
               0) ;;
               3) # upstream unreachable: preserve the mirror, record a tombstone
