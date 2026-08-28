@@ -8,10 +8,11 @@ made private upstream stays available.
 source for every mirrored repository is its upstream, linked from each mirror's
 homepage field.
 
-> **Status: 149 of 209 mirrored**, all verified byte-identical to upstream
-> across every branch and tag. 60 pending, waiting on GitHub's
-> repository-creation rate limit. Org setup is complete. See the execution
-> record in [`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md#7-execution-record).
+> **Status: all 209 repositories mirrored and verified.** 207 are identical to
+> upstream ref for ref; 2 additionally hold branches upstream has since deleted,
+> which is the point of the archive. Both workflows are green on Actions.
+> Execution record, including the eight bugs the real run exposed, is in
+> [`docs/EXECUTION-PLAN.md`](docs/EXECUTION-PLAN.md#7-execution-record).
 
 ## Scope
 

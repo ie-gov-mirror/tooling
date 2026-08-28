@@ -3,8 +3,8 @@
 Mirroring Irish public-sector GitHub repositories, modelled on
 [uk-gov-mirror](https://github.com/uk-gov-mirror).
 
-**Status:** Phase 0 complete, backfill in progress — **149 of 209 mirrored**
-and verified byte-identical, 60 pending (see §7).
+**Status:** Complete and running. **209 of 209 mirrored**, all verified against
+upstream; both workflows green on Actions. See the execution record in §7.
 **Source data:** research snapshot of 11 August 2026 (`docs/source-research-2026-08-11.md`).
 **Control repo:** `ie-gov-mirror/tooling` (this repo).
 
@@ -436,6 +436,8 @@ incident, not during it.
 | 12 | Reported live credential | **Notify upstream, leave the mirror up.** Removal only if the body requests it. |
 | 13 | The 18 candidates | **Dropped** — see below. |
 | 14 | Cadence | **Claim "updated at least weekly"** from the start. |
+| 15 | Refs deleted upstream | **Kept.** No `--prune`; a mirror is a superset of its upstream (§3.8). |
+| 16 | Push protection | **Cannot be disabled** on a free plan. Blocked pushes go up with the mirror temporarily private (§3.4). |
 
 Not adopted: a `meta-repository`-style submodule metarepo. It earns its keep
 at 26,416 repos; at 209 the manifest CSV serves the same discovery need.
@@ -547,29 +549,29 @@ Inventory figures computed from `manifest/inventory-2026-08-11.csv`.
 
 ### Bugs found by running it
 
-Every one of these needed a real repository of a particular shape; none would
-have appeared in a dry run.
+Eight, every one needing a real repository of a particular shape. None would
+have appeared in a dry run, and **four presented as a green run doing the wrong
+thing** — which is why `verify_mirrors.py` exists and why status was never
+treated as evidence.
 
-1. **`sha_pinning_required`** is enabled on the org, so `actions/checkout@v4`
-   would have been rejected at first run. Now pinned to a commit SHA.
-2. **`last_synced` was never written** — read in one place, set in none. The
-   weekly sync's `pushed_at` gate could never engage, so every run would have
-   re-cloned all 209 repositories (~11.5 GiB) indefinitely. Added
-   `--mark-synced`.
-3. **Chunked push sliced by commit count.** `edprofiles` has only 71 commits on
-   `main`, so `awk 'NR % 2000 == 0'` emitted nothing, no slices were pushed,
-   and the whole 4.3 GiB went out as one pack → `HTTP 500`. Slices are now
-   derived from repository size.
-4. **Scratch ref deleted before the default branch was set.** On a fresh
-   repository `__backfill` is the first ref pushed, so GitHub makes it the
-   default branch — and a default branch cannot be deleted. The cleanup failed
-   silently on every chunked mirror. Deletion now happens after the real
-   default branch is set.
-5. **Repository-creation throttle unhandled.** See below.
-6. **The verifier did not paginate `/git/refs`.** Refs sort
-   `heads < pull < tags`, and this endpoint *does* return `refs/pull`, so on a
-   repository with over 100 refs the tags sat on a later page and were never
-   compared. Tag verification was silently skipped.
+| # | Bug | Consequence if unfixed |
+|---|---|---|
+| 1 | `sha_pinning_required` is enabled on the org, so `actions/checkout@v4` was rejected | Every workflow run fails |
+| 2 | `last_synced` was read in one place and written in none | Weekly sync re-clones all 209 repos (~11.5 GiB) forever |
+| 3 | Chunked push sliced by commit count; `edprofiles` has 71 commits so `awk 'NR % 2000'` emitted nothing | 4.3 GiB repo unmirrorable, `HTTP 500` |
+| 4 | Scratch ref deleted before the default branch was set — GitHub refuses to delete a default branch | Stray `__backfill` branch on every chunked mirror |
+| 5 | Repository-creation throttle unhandled | 6 repositories dropped rather than deferred |
+| 6 | Verifier read only page 1 of `/git/refs`; refs sort `heads < pull < tags` | Tags never verified on any repo with >100 refs |
+| 7 | `/orgs/{name}/repos` assumed, but `Geological-Survey-Ireland` is a **User** account | **Every** scheduled run failed from 21–27 August |
+| 8 | Sync gate compared against `upstream_pushed_at`, which the daily enumerate overwrites | Stale mirrors reported as current, permanently unfixable |
+
+Bug 8 is the one worth remembering. The daily job was silently disarming the
+weekly one: upstream pushes, enumerate advances the watermark, the comparison
+goes equal, and the repository is never re-synced. It surfaced only because a
+green `sync` run reporting 12/12 shards successful was checked against what it
+had actually done — `ogcio/govie-ds` sat a day stale while the manifest claimed
+it was current. Fixed with a separate `synced_pushed_at` column that only a
+successful sync advances.
 
 ### The repository-creation rate limit
 
@@ -577,27 +579,59 @@ The backfill was blocked after **~149 creations in under an hour**:
 
 > You have created too many repositories, too quickly.
 
-The important detail is that `/rate_limit` reported **5000/5000 remaining on
-both `core` and `graphql`** throughout. This limit is invisible there and
-cannot be predicted — only observed by being refused. The documented 500
-content-generating requests per hour was never the binding constraint.
+`/rate_limit` reported **5000/5000 remaining on both `core` and `graphql`**
+throughout. This limit is invisible there and cannot be predicted, only
+observed by being refused. The documented 500 content-generating requests per
+hour was never the binding constraint.
 
-`sync_repo.sh` now backs off (60s doubling to a 30-minute ceiling) and returns
-exit 4 so a throttled repository is deferred rather than dropped. Repeated
-creation attempts while blocked can *extend* the limit, so probing is
-deliberately infrequent. **Budget ~150 creations per hour**: a full 209-repo
-backfill is a two-session job.
+`sync_repo.sh` backs off (60s doubling to a 30-minute ceiling) and returns exit
+4 so a throttled repository is deferred rather than dropped. Repeated attempts
+while blocked can *extend* the limit, so probing is deliberately infrequent —
+waiting one hour cleared it on the first probe. **Budget ~150 creations per
+hour.**
 
 ### Fidelity
 
 `scripts/verify_mirrors.py` compares the complete `{ref: sha}` mapping on both
-sides of every manifest row, because exit codes proved untrustworthy twice — a
-push printed `[remote rejected]` on every ref while the refs had in fact
-landed, and a background wrapper reported exit 0 for a script that exited 1.
+sides of every manifest row, across all pages.
 
-Latest sweep: **149 mirrored, all byte-identical across every branch and tag.
-Zero mismatches.** 60 pending.
+Final sweep — **209 of 209 mirrored**:
 
-**Git LFS:** all 209 upstreams checked. Twenty have a root `.gitattributes`
-and none uses `filter=lfs`, so no mirror depends on the LFS path. This covers
-root `.gitattributes` only; LFS configured in a subdirectory would be missed.
+| Verdict | Count | Meaning |
+|---|---:|---|
+| `ok` | 207 | Every ref identical to upstream |
+| `ok-with-extra` | 2 | Mirror holds refs upstream has since deleted — the archive working as intended |
+| `MISMATCH` | 0 | |
+
+The two `ok-with-extra` are the no-prune decision (§3.8) demonstrated on live
+data: six `dependabot/*` branches on
+`HSEIreland/hse-healthapp-test-fhir-server` and four feature branches on
+`ogcio/govie-ds`, all deleted upstream after being mirrored. Under `--prune`
+all ten would have been destroyed.
+
+**Git LFS:** all 209 upstreams checked; the 20 with a root `.gitattributes` use
+only `text=auto`, `diff`, `merge` and `export-ignore` directives. None uses
+`filter=lfs`. Covers root `.gitattributes` only.
+
+**One repository needed a workaround:** `ogcio.govie-messagingie` was pushed
+with the mirror temporarily private because its upstream history contains
+Google OAuth credentials and push protection cannot be disabled (§3.4). Noted
+in `fidelity_notes`.
+
+### Workflows proven on Actions
+
+| Workflow | Run | Result |
+|---|---|---|
+| `enumerate` | #8 | Success. All 9 namespaces listed, 0 new, 0 gone, manifest committed |
+| `sync` | #3 | Success, 12/12 shards. Detected the one stale mirror, pushed 36 branches and 797 tags, stamped the watermark, gate closed to 0 |
+
+Schedules: `enumerate` daily 06:00 UTC, `sync` Mondays 02:00 UTC.
+
+### Outstanding, for a human
+
+1. Revoke the backfill PAT and replace the `MIRROR_TOKEN` secret value.
+2. Set the organisation 2FA requirement — read-only in the API, web UI only.
+3. Decide the OGCIO credential disclosure. Details are in
+   `FINDINGS-credentials.local.md`, which is deliberately untracked.
+   `POLICY.md` commits to notifying an upstream body about a live-looking
+   credential, while decision 6 was not to contact OGCIO. Unresolved.
