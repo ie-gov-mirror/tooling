@@ -63,37 +63,20 @@ jobs:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
           MIRROR_ORG: ${{ github.repository_owner }}
           WORKDIR: ${{ runner.temp }}/work
-        run: |
-          set -uo pipefail
-          mkdir -p "$WORKDIR"
-          : > synced.txt
-          while IFS=$'\t' read -r clone_url mirror_name default_branch tier pushed_at; do
-            [ -z "${clone_url:-}" ] && continue
-            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"
-            case $? in
-              0) printf '%s\t%s\n' "$mirror_name" "$pushed_at" >> synced.txt ;;
-              4) echo "::warning::$mirror_name deferred - repo creation throttled" ;;
-              *) echo "::error::backfill failed for $mirror_name" ;;
-            esac
-            rm -rf "$WORKDIR"/* || true
-            # The real constraint is an undocumented secondary limit on
-            # repository creation, hit after ~150 creations in under an hour.
-            # sync_repo.sh backs off on its own; this just keeps the steady
-            # rate below the threshold. Raise CREATE_PACE_SECONDS if a large
-            # namespace still trips it.
-            sleep "${CREATE_PACE_SECONDS:-20}"
-          done < worklist.tsv
+          # The real constraint is an undocumented secondary limit on
+          # repository creation, hit after ~150 creations in under an hour.
+          # sync_repo.sh backs off on its own; this just keeps the steady
+          # rate below the threshold. Raise it if a large namespace still
+          # trips the limit.
+          PACE_SECONDS: 20
+        run: scripts/sync_worklist.sh worklist.tsv synced.txt
 
       - name: Record results
         if: ${{ always() && inputs.dry_run == false }}
         env:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          NS: ${{ inputs.org }}
         run: |
-          python scripts/enumerate.py --ns "${{ inputs.org }}" --update-manifest
-          [ -s synced.txt ] && python scripts/enumerate.py --mark-synced synced.txt || true
-          git config user.name "ie-gov-mirror bot"
-          git config user.email "noreply@github.com"
-          git add manifest/
-          git diff --quiet --cached || \
-            git commit -m "Backfill ${{ inputs.org }}: record mirrored repositories"
-          git push origin HEAD:"${{ github.ref_name }}" || true
+          touch synced.txt
+          scripts/commit_manifest.sh "Backfill $NS: record mirrored repositories" \
+            python scripts/enumerate.py --ns "$NS" --update-manifest --mark-synced synced.txt

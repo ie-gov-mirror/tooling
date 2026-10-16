@@ -1,12 +1,13 @@
 name: enumerate upstream
 
-# Re-enumerates the nine verified namespaces through the API rather than
-# trusting the static research snapshot. ~13 API calls, so it runs daily.
+# Re-enumerates the verified namespaces through the API rather than trusting
+# the static research snapshot. Cheap, so it runs daily.
 #
 # New repositories in those namespaces are accepted automatically and
 # committed straight to the branch - the verified thing is the namespace, so a
-# new repo inside one needs no separate approval. They are mirrored by the next
-# sync run. Disappearances go to the tombstone flow, which never deletes.
+# new repo inside one needs no separate approval - and a sync is dispatched
+# for their namespace at once. Disappearances go to the tombstone flow, which
+# never deletes.
 
 on:
   schedule:
@@ -14,61 +15,52 @@ on:
   workflow_dispatch:
 
 permissions:
-  # Load-bearing: the commit step below pushes using the credentials
+  # Load-bearing: commit_manifest.sh pushes with the credentials
   # actions/checkout persists, which are GITHUB_TOKEN's.
   contents: write
-
-concurrency:
-  group: enumerate
-  cancel-in-progress: false
+  # Dispatching sync for newly accepted repositories. workflow_dispatch is one
+  # of the two events GITHUB_TOKEN may trigger.
+  actions: write
 
 jobs:
   enumerate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    # Shared with the sync workflow's record job: the two writers of the
+    # manifest queue rather than race. commit_manifest.sh still retries if
+    # they collide anyway, so this reduces contention, it is not the guard.
+    concurrency:
+      group: manifest-writer
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Drift report
-        id: drift
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
-        # enumerate.py exits non-zero when there is drift needing attention,
-        # which is information, not failure.
-        run: python scripts/enumerate.py --report | tee drift.txt || true
-
-      - name: Update manifest
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
-        run: python scripts/enumerate.py --update-manifest
-
-      - name: Check for vanished upstreams
+      - name: Refresh and commit manifest
         env:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
           MIRROR_ORG: ${{ github.repository_owner }}
-        run: python scripts/tombstone.py --check-all
-
-      - name: Regenerate the deleted-repository report
-        # docs/DELETED.md is generated from tombstones.csv so it cannot drift.
-        run: python scripts/deleted_repo_report.py
-
-      - name: Commit manifest
+          DISPATCH_TOKEN: ${{ github.token }}
         run: |
-          # Committed directly: new repos in verified namespaces are
-          # auto-accepted, so there is nothing to approve. `git log
-          # manifest/core.csv` remains the audit trail of what was added when,
-          # and each auto-accepted row records the namespace it came from.
-          git config user.name "ie-gov-mirror bot"
-          git config user.email "noreply@github.com"
-          git add manifest/ docs/DELETED.md
-          if git diff --quiet --cached; then
-            echo "no manifest changes"
-            exit 0
+          rc=0
+          scripts/commit_manifest.sh "Update manifest from upstream enumeration" \
+            scripts/refresh_manifest.sh || rc=$?
+
+          # 0 = committed. 3 = committed, but a namespace could not be listed.
+          # Either way any newly accepted rows are on the branch now, so
+          # mirror them straight away rather than waiting up to a week for
+          # the scheduled sync.
+          if { [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; } && [ -s accepted.txt ]; then
+            namespaces=$(cut -d/ -f1 accepted.txt | sort -u | xargs)
+            echo "dispatching sync for newly accepted repositories in: $namespaces"
+            GH_TOKEN="$DISPATCH_TOKEN" gh workflow run sync.yml \
+              --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+              -f namespaces="$namespaces"
           fi
-          git commit -m "Update manifest from upstream enumeration"
-          git pull --rebase --autostash origin "${{ github.ref_name }}" || true
-          git push origin HEAD:"${{ github.ref_name }}"
+          exit "$rc"
 
       - name: Summary
         if: always()
-        run: cat drift.txt >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          [ -f drift.txt ] && cat drift.txt >> "$GITHUB_STEP_SUMMARY"
+          [ -s accepted.txt ] && { echo; echo "Auto-accepted:"; cat accepted.txt; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
