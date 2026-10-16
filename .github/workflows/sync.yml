@@ -2,7 +2,13 @@ name: sync mirrors
 
 # Weekly incremental refresh, sharded by upstream namespace. Gated on
 # upstream pushed_at, so a typical run re-clones a handful of repositories
-# rather than the whole 11.5 GiB.
+# rather than the whole 11.5 GiB. Also dispatched by the enumerate workflow,
+# scoped to the namespaces where it has just auto-accepted new repositories.
+#
+# Shards only mirror. They cannot write the manifest - their token is
+# read-only - and instead hand their results to a single record job. Twelve
+# shards each committing and rebasing used to conflict on neighbouring CSV
+# rows and silently drop records; one writer per run cannot race itself.
 
 on:
   schedule:
@@ -13,16 +19,49 @@ on:
         description: "Re-sync every repository, ignoring pushed_at gating"
         type: boolean
         default: false
+      namespaces:
+        description: "Space-separated namespaces to sync (empty = all)"
+        type: string
+        default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      namespaces: ${{ steps.plan.outputs.namespaces }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Choose namespaces
+        id: plan
+        env:
+          REQUESTED: ${{ inputs.namespaces }}
+        run: |
+          set -euo pipefail
+          # The matrix comes from the manifest, so it cannot drift from it.
+          known=$(python scripts/enumerate.py --list-namespaces)
+          read -ra requested <<< "$REQUESTED"
+          if [ "${#requested[@]}" -gt 0 ]; then
+            for ns in "${requested[@]}"; do
+              grep -qxF "$ns" <<< "$known" || { echo "::error::unknown namespace: $ns"; exit 1; }
+            done
+            chosen=$(printf '%s\n' "${requested[@]}")
+          else
+            chosen=$known
+          fi
+          echo "namespaces=$(jq -Rnc '[inputs | select(length > 0)]' <<< "$chosen")" >> "$GITHUB_OUTPUT"
+          echo "syncing: $(xargs <<< "$chosen")"
+
   sync:
+    needs: plan
     runs-on: ubuntu-latest
     # Six hours is the hard Actions job ceiling. The largest shard
     # (CSOIreland, ~6 GiB dominated by one 4.4 GiB repo) sits well inside it.
@@ -33,19 +72,7 @@ jobs:
       # requests/minute secondary limit and stays polite to upstream.
       max-parallel: 3
       matrix:
-        org:
-          - CSOIreland
-          - covidgreen
-          - derilinx
-          - Geological-Survey-Ireland
-          - HSEIreland
-          - IrishMarineInstitute
-          - localgovdrupal
-          - MetEireann
-          - ogcio
-          - Oireachtas
-          - revenue-ie
-          - Teagasc
+        org: ${{ fromJSON(needs.plan.outputs.namespaces) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -59,61 +86,66 @@ jobs:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
           MIRROR_ORG: ${{ github.repository_owner }}
           WORKDIR: ${{ runner.temp }}/work
+          NS: ${{ matrix.org }}
+          FORCE_ALL: ${{ inputs.force_all }}
         run: |
-          set -uo pipefail
-          mkdir -p "$WORKDIR"
+          set -euo pipefail
+          : > "synced-$NS.txt"
           FORCE=""
-          [ "${{ inputs.force_all }}" = "true" ] && FORCE="--force-all"
-
-          python scripts/enumerate.py --ns "${{ matrix.org }}" \
-            --emit-changed $FORCE > worklist.tsv || true
+          [ "$FORCE_ALL" = "true" ] && FORCE="--force-all"
+          # No `|| true`: a bad token or an unlistable namespace must fail the
+          # shard, not yield an empty worklist that passes as "nothing to do".
+          python scripts/enumerate.py --ns "$NS" --emit-changed $FORCE > worklist.tsv
           echo "$(wc -l < worklist.tsv) repositories to sync"
+          scripts/sync_worklist.sh worklist.tsv "synced-$NS.txt"
 
-          FAILED=0; THROTTLED=0
-          : > synced.txt
-          while IFS=$'\t' read -r clone_url mirror_name default_branch tier pushed_at; do
-            [ -z "${clone_url:-}" ] && continue
-            scripts/sync_repo.sh "$clone_url" "$mirror_name" "$default_branch" "$tier"
-            rc=$?
-            # Record the pre-sync pushed_at, so an upstream push landing during
-            # the sync is still seen by the next run.
-            [ "$rc" -eq 0 ] && printf '%s\t%s\n' "$mirror_name" "$pushed_at" >> synced.txt
-            case "$rc" in
-              0) ;;
-              3) # upstream unreachable: preserve the mirror, record a tombstone
-                 python scripts/tombstone.py \
-                   --check "$(echo "$clone_url" | sed -E 's#https://github.com/(.*)\.git#\1#')" ;;
-              4) # creation secondary rate limit: not a fault, retry next run
-                 echo "::warning::$mirror_name deferred - repo creation throttled"
-                 THROTTLED=$((THROTTLED + 1)) ;;
-              *) echo "::error::sync failed for $mirror_name (exit $rc)"
-                 FAILED=$((FAILED + 1)) ;;
-            esac
-            # Reclaim runner disk: ~14 GB available, largest repo is 4.4 GB.
-            rm -rf "$WORKDIR"/* || true
-          done < worklist.tsv
+      - name: Hand results to the record job
+        # Also after a failed sync: whatever did mirror must still be recorded.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: synced-${{ matrix.org }}
+          path: synced-${{ matrix.org }}.txt
+          retention-days: 7
 
-          echo "failed=$FAILED throttled=$THROTTLED" >> "$GITHUB_STEP_SUMMARY"
-          [ "$FAILED" -gt 0 ] && exit 1 || exit 0
+  record:
+    needs: [plan, sync]
+    # Runs when some shards failed, so the repositories that did mirror are
+    # recorded. Skipped only if the run was cancelled or never planned.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # The only job in this workflow that can write.
+      contents: write
+    # Shared with the enumerate workflow, the other manifest writer.
+    concurrency:
+      group: manifest-writer
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Record sync results in manifest
-        if: always()
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: synced-*
+          path: results
+          merge-multiple: true
+
+      - name: Record and commit
         env:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          NAMESPACES: ${{ join(fromJSON(needs.plan.outputs.namespaces), ' ') }}
         run: |
-          python scripts/enumerate.py --ns "${{ matrix.org }}" --update-manifest
-          # Stamps last_synced, which is what makes the next run incremental.
-          [ -s synced.txt ] && python scripts/enumerate.py --mark-synced synced.txt || true
+          set -uo pipefail
+          shopt -s nullglob
+          files=(results/synced-*.txt)
+          cat /dev/null "${files[@]}" > synced.txt
+          echo "$(wc -l < synced.txt) repositories to record from ${#files[@]} shards"
 
-      - name: Commit manifest
-        if: always()
-        run: |
-          # The manifest is the provenance record: `git log manifest/core.csv`
-          # is the audit trail of first_seen / last_seen / last_synced.
-          git config user.name "ie-gov-mirror bot"
-          git config user.email "noreply@github.com"
-          git add manifest/
-          git diff --quiet --cached || \
-            git commit -m "Sync ${{ matrix.org }}: update manifest timestamps"
-          git pull --rebase --autostash origin "${{ github.ref_name }}" || true
-          git push origin HEAD:"${{ github.ref_name }}" || true
+          ns_args=()
+          for ns in $NAMESPACES; do ns_args+=(--ns "$ns"); done
+          # Update first so repositories auto-accepted mid-run have rows,
+          # then stamp what mirrored. Both inside the retry, so a lost race
+          # recomputes them on the newest tip instead of dropping them.
+          scripts/commit_manifest.sh "Sync: record $(wc -l < synced.txt) mirrored repositories" \
+            python scripts/enumerate.py "${ns_args[@]}" --update-manifest --mark-synced synced.txt

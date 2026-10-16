@@ -47,7 +47,9 @@ MIRROR_PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/${MIRROR_ORG}/${M
 note "cloning $UPSTREAM_URL"
 if ! git clone --mirror --quiet "$UPSTREAM_URL" "$WORKDIR"; then
   note "clone failed - upstream may be deleted, private, or DMCA'd"
-  exit 3   # exit 3 == "upstream unreachable", caller runs tombstone.py
+  exit 3   # exit 3 == clone failed. The caller retries; whether the upstream
+           # is really gone is decided by the daily tombstone check, which
+           # asks the API rather than inferring from a failed clone.
 fi
 cd "$WORKDIR" || fail "cannot enter $WORKDIR"
 

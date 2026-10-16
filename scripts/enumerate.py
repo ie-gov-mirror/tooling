@@ -9,8 +9,9 @@ Two classes of namespace, treated differently on purpose:
   * DISCOVERY namespaces (the nine verified public bodies) are enumerated
     wholesale. Every public repo in them is in scope, because the namespace
     itself is what was verified as belonging to a public body. New
-    repositories found here are accepted automatically and mirrored on the
-    next sync - no human review step.
+    repositories found here are accepted automatically - no human review
+    step - and the enumerate workflow dispatches a sync for their namespace
+    straight away.
 
   * LISTED namespaces (extended and candidate tiers) are NOT enumerated.
     Only the specific repositories recorded in the manifest are synced.
@@ -22,6 +23,21 @@ Usage:
   enumerate.py --emit-changed           # tab-separated worklist for sync
   enumerate.py --emit-changed --ns CSOIreland
   enumerate.py --update-manifest        # apply last_seen / pushed_at / new rows
+  enumerate.py --update-manifest --mark-synced synced.txt
+                                        # ...then stamp what a sync mirrored
+
+Exit status:
+  0  success. Drift - new or vanished repositories - is success: new ones are
+     auto-accepted and vanished ones are handled by tombstone.py, so neither
+     needs a human. Treating drift as failure is what stopped the daily run
+     the first time a new repository actually appeared.
+  1  error: bad token, API failure. Nothing should be committed.
+  2  bad arguments (argparse's own code).
+  3  a namespace could not be listed at all. Every other namespace was still
+     processed and written, so callers should commit that progress and then
+     fail - a renamed or deleted account is a trust decision for a human.
+     Deliberately not 2: Python's argparse and bash both exit 2 on misuse, and
+     a caller must never mistake a broken invocation for partial success.
 """
 
 import argparse
@@ -75,6 +91,13 @@ DISCOVERY_NAMESPACES = [
 
 API = "https://api.github.com"
 
+EXIT_OK = 0
+EXIT_UNREACHABLE = 3
+
+# A GitHub 5xx or a dropped connection is retried rather than failing the run.
+# Backoff doubles from 5s, so three retries wait 10s, 20s and 40s.
+TRANSIENT_RETRIES = 3
+
 
 def api_request(path):
     """Single GitHub REST GET returning (payload, link header)."""
@@ -92,6 +115,7 @@ def api_get(path, allow_missing=False):
     """Paginated GET. Authenticated for 5,000 req/hr rather than 60."""
     out = []
     url = path
+    transient = 0
     while url:
         try:
             payload, link = api_request(url)
@@ -117,13 +141,32 @@ def api_get(path, allow_missing=False):
                     return None
                 print(f"HTTP 404 on {url}", file=sys.stderr)
                 return None
+            if exc.code >= 500 and transient < TRANSIENT_RETRIES:
+                transient += 1
+                retry_pause(f"HTTP {exc.code} on {url}", transient)
+                continue
             raise
+        except urllib.error.URLError as exc:
+            # Network-level failure: DNS, reset connection, TLS handshake.
+            if transient < TRANSIENT_RETRIES:
+                transient += 1
+                retry_pause(f"{exc.reason} on {url}", transient)
+                continue
+            raise
+        transient = 0
         out.extend(payload) if isinstance(payload, list) else out.append(payload)
         url = ""
         for part in link.split(","):
             if 'rel="next"' in part:
                 url = part.split(";")[0].strip().strip("<>")
     return out
+
+
+def retry_pause(what, attempt):
+    wait = 5 * 2 ** attempt
+    print(f"{what} - retry {attempt}/{TRANSIENT_RETRIES} in {wait}s",
+          file=sys.stderr)
+    time.sleep(wait)
 
 
 def mirror_name(owner, name):
@@ -186,6 +229,44 @@ def namespaces(tiers):
     return sorted(seen, key=str.lower)
 
 
+def mark_synced(tiers, path):
+    """Stamp the rows a sync mirrored successfully.
+
+    Stamping last_synced is what makes the weekly refresh incremental: the
+    sync gate compares upstream pushed_at against it, so without this every
+    run would re-clone every repository.
+    """
+    today = date.today().isoformat()
+    wanted = {}
+    for line in open(path):
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        wanted[parts[0].strip()] = parts[1].strip() if len(parts) > 1 else None
+    stamped = 0
+    for filename, (rows, fields) in tiers.items():
+        dirty = False
+        for row in rows:
+            if row["mirror_name"] in wanted:
+                row["last_synced"] = today
+                row["status"] = "active"
+                # Fall back to the observed value when the caller supplied
+                # no pushed_at, so older callers still advance the gate.
+                stamp = wanted[row["mirror_name"]] or row.get("upstream_pushed_at", "")
+                if "synced_pushed_at" in row:
+                    row["synced_pushed_at"] = stamp
+                dirty = True
+                stamped += 1
+        if dirty:
+            write_tier(filename, rows, fields)
+    print(f"stamped last_synced on {stamped} rows", file=sys.stderr)
+    missing = set(wanted) - {r["mirror_name"] for rs, _ in tiers.values() for r in rs}
+    if missing:
+        print(f"warning: {len(missing)} names not in manifest: "
+              f"{sorted(missing)[:5]}", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ns", "--org", action="append", dest="ns",
@@ -195,7 +276,12 @@ def main():
     ap.add_argument("--update-manifest", action="store_true")
     ap.add_argument("--mark-synced", metavar="FILE",
                     help="file of mirror names (one per line) that synced "
-                         "successfully; stamps last_synced and status=active")
+                         "successfully; stamps last_synced and status=active. "
+                         "With --update-manifest, applied after the update")
+    ap.add_argument("--accepted-out", metavar="FILE",
+                    help="with --update-manifest, write the upstreams it "
+                         "auto-accepted to FILE, one per line (always written, "
+                         "so an empty file means none)")
     ap.add_argument("--list-namespaces", action="store_true")
     ap.add_argument("--force-all", action="store_true",
                     help="emit every repo, not just those pushed since last sync")
@@ -203,41 +289,13 @@ def main():
 
     tiers = load_all()
 
-    # Stamping last_synced is what makes the weekly refresh incremental: the
-    # sync gate compares upstream pushed_at against it, so without this every
-    # run would re-clone every repository.
-    if args.mark_synced:
-        today = date.today().isoformat()
-        wanted = {}
-        for line in open(args.mark_synced):
-            line = line.rstrip("\n")
-            if not line.strip():
-                continue
-            parts = line.split("\t")
-            wanted[parts[0].strip()] = parts[1].strip() if len(parts) > 1 else None
-        stamped = 0
-        for filename, (rows, fields) in tiers.items():
-            dirty = False
-            for row in rows:
-                if row["mirror_name"] in wanted:
-                    row["last_synced"] = today
-                    row["status"] = "active"
-                    # Fall back to the observed value when the caller supplied
-                    # no pushed_at, so older callers still advance the gate.
-                    stamp = wanted[row["mirror_name"]] or row.get("upstream_pushed_at", "")
-                    if "synced_pushed_at" in row:
-                        row["synced_pushed_at"] = stamp
-                    dirty = True
-                    stamped += 1
-            if dirty:
-                write_tier(filename, rows, fields)
-        print(f"stamped last_synced on {stamped} rows", file=sys.stderr)
-        missing = wanted - {r["mirror_name"] for rs, _ in tiers.values() for r in rs}
-        if missing:
-            print(f"warning: {len(missing)} names not in manifest: "
-                  f"{sorted(missing)[:5]}", file=sys.stderr)
-        if not args.report and not args.emit_changed and not args.update_manifest:
-            return 0
+    # Standalone --mark-synced needs no API calls, so it runs here. Combined
+    # with --update-manifest it runs after the update instead, so repositories
+    # that update has just auto-accepted already have rows to stamp.
+    if args.mark_synced and not args.update_manifest:
+        mark_synced(tiers, args.mark_synced)
+        if not args.report and not args.emit_changed:
+            return EXIT_OK
 
     if args.list_namespaces:
         for ns in namespaces(tiers):
@@ -324,7 +382,7 @@ def main():
         print(f"live upstream repos: {len(live)}")
         print(f"manifest rows in scope: {len(in_scope)}")
         print(f"needing sync: {len(changed)}")
-        print(f"new upstream (review before mirroring): {len(new_upstream)}")
+        print(f"new upstream (auto-accepted): {len(new_upstream)}")
         for n in new_upstream:
             print(f"  + {n}")
         print(f"disappeared upstream (tombstone candidates): {len(gone)}")
@@ -363,8 +421,8 @@ def main():
         # seeded rows. The verified thing is the namespace: if CSOIreland is
         # the Central Statistics Office's account, a new repository in it is
         # CSO code by the same evidence that covers the other 35. No human
-        # gate, so a repo published upstream on Monday is mirrored by the
-        # following sync.
+        # gate: the enumerate workflow dispatches a sync for the namespace as
+        # soon as the new row is committed.
         #
         # The safety property this relies on is that DISCOVERY_NAMESPACES is
         # the only list that grants automatic trust, and it is only ever
@@ -398,6 +456,11 @@ def main():
         if added:
             write_tier("core.csv", core_rows, core_fields)
         print(f"manifest updated ({added} new rows)", file=sys.stderr)
+        if args.accepted_out:
+            with open(args.accepted_out, "w") as fh:
+                fh.writelines(f"{n}\n" for n in new_upstream)
+        if args.mark_synced:
+            mark_synced(tiers, args.mark_synced)
 
     # Unreachable namespaces are the serious case: repositories in them were
     # not checked at all, so their absence from `live` must not be mistaken for
@@ -405,7 +468,7 @@ def main():
     if unreachable:
         print(f"warning: {len(unreachable)} namespace(s) unreachable: "
               f"{unreachable}", file=sys.stderr)
-    return 1 if (new_upstream or gone or unreachable) else 0
+    return EXIT_UNREACHABLE if unreachable else EXIT_OK
 
 
 if __name__ == "__main__":

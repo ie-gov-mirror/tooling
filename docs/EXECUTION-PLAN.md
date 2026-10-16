@@ -329,7 +329,8 @@ Three rules encoded in the tooling:
 - **New repos in verified namespaces are auto-accepted.** The daily
   enumeration adds them with `ownership_confidence=high`, `status=pending` and
   a `fidelity_notes` entry recording the namespace they came from, then commits
-  directly to the branch. The next sync mirrors them. The verified thing is the
+  directly to the branch, then dispatches a sync for that namespace, so they
+  are mirrored within minutes. The verified thing is the
   namespace: a new repository in `CSOIreland` is CSO code on the same evidence
   that covers the other 35, so there is nothing extra for a human to approve.
 - **`DISCOVERY_NAMESPACES` in `scripts/enumerate.py` is the only thing that
@@ -364,7 +365,7 @@ Three rules encoded in the tooling:
 ### Phase 3 — Steady state
 
 - `enumerate.yml` daily: detects new repos (auto-accepted, committed
-  directly, mirrored on the next sync), renames (GitHub redirects old clone
+  directly, mirrored minutes later by a dispatched sync), renames (GitHub redirects old clone
   URLs; follow and update the manifest), deletions (→ tombstone), and
   `pushed_at` changes.
 - `sync.yml` weekly, `pushed_at`-gated, sharded 3-at-a-time.
@@ -421,7 +422,7 @@ incident, not during it.
 
 | # | Question | Decision |
 |---|---|---|
-| 0 | New repos in verified namespaces | **Auto-accepted** — no review gate. Committed directly by the daily enumeration and mirrored on the next sync. |
+| 0 | New repos in verified namespaces | **Auto-accepted** — no review gate. Committed directly by the daily enumeration, which dispatches a sync for that namespace straight away. |
 | 1 | Extended tier destination | **Same org, no name prefix.** Marked by a `not-government-owned` topic and an explicit description. Verified there are **zero collisions across all 209 repos** under `owner.repo` — the 7 `covid-green-*` clashes only exist under flat naming, and the owner segment separates them. |
 | 2 | Credential | **Fine-grained PAT now, migrate to a GitHub App later.** Stored as the `MIRROR_TOKEN` org secret. |
 | 3 | Secret scanning | **Push protection and alerts both off.** |
