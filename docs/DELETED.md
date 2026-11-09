@@ -4,10 +4,15 @@ Irish public-sector repositories that have been deleted, made private, or otherw
 
 Generated from `manifest/tombstones.csv`. Do not edit by hand.
 
-**1 repositories** recorded across 1 namespaces.
+## Nothing currently missing
 
-## ogcio (1)
+Every tracked repository that disappeared upstream has since returned.
 
-| Repository | Last seen | Detected gone | Mirror |
-|---|---|---|---|
-| `ogcio/wagtail-charts` | 2026-11-04 | 2026-11-05 | [ogcio.wagtail-charts](https://github.com/ie-gov-mirror/ogcio.wagtail-charts) |
+
+## Disappeared, then came back
+
+These were missing upstream for a while and are public again. The mirror kept them throughout.
+
+| Repository | Detected gone | Returned |
+|---|---|---|
+| `ogcio/wagtail-charts` | 2026-11-05 | 2026-11-09 |

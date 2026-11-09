@@ -1,2 +1,2 @@
-upstream,mirror_name,last_seen,detected_gone,http_status,wayback_url,note
-ogcio/wagtail-charts,ogcio.wagtail-charts,2026-11-04,2026-11-05,404,https://web.archive.org/web/https://github.com/ogcio/wagtail-charts,upstream deleted or made private; mirror preserved
+upstream,mirror_name,last_seen,detected_gone,http_status,wayback_url,note,returned
+ogcio/wagtail-charts,ogcio.wagtail-charts,2026-11-04,2026-11-05,404,https://web.archive.org/web/https://github.com/ogcio/wagtail-charts,upstream deleted or made private; mirror preserved,2026-11-09
