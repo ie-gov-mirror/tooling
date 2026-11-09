@@ -128,6 +128,15 @@ if ! gh repo view "${MIRROR_ORG}/${MIRROR_NAME}" >/dev/null 2>&1; then
     *) fail "repo creation failed" ;;
   esac
   sleep "${CREATE_PACE_SECONDS:-2}"
+elif [ "$(gh repo view "${MIRROR_ORG}/${MIRROR_NAME}" --json isArchived \
+           --jq .isArchived 2>/dev/null)" = "true" ]; then
+  # Archived mirrors reject every push. The worklist skips tombstoned rows, so
+  # reaching here means the mirror was archived some other way - by hand, or
+  # by a tombstone the manifest does not reflect. Say so rather than letting
+  # the push fail with a 403 that looks like a token problem.
+  note "mirror is archived - not pushing. If its upstream is live, unarchive"
+  note "${MIRROR_ORG}/${MIRROR_NAME} and check its manifest status"
+  exit 5   # exit 5 == mirror archived; retrying cannot help
 fi
 
 # Topics are metadata, never contents - the fidelity contract is untouched.
@@ -263,7 +272,7 @@ else
       push_via_private || fail "push failed even with the mirror private"
     else
       note "$push_out"
-      fail "push rejected (check workflows:write on the token)"
+      fail "push rejected - see the git error above. A 403 usually means the token lacks workflows:write or the mirror is archived"
     fi
   fi
 fi

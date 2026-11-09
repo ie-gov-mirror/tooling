@@ -115,6 +115,17 @@ GitHub-archived — visibly frozen and push-proof — and a row is appended to
 `manifest/tombstones.csv` with last-seen date, detection date, HTTP status and
 a Wayback URL. `docs/DELETED.md` is generated from that file.
 
+A 404 is acted on only once a repository has been missing for two daily
+checks, so a repository made private briefly while its owner sorts out
+visibility is not treated as deleted. Nothing is at risk meanwhile: the mirror
+already holds it. A 451 is tombstoned at once.
+
+A tombstone from a 404 is reversed if the upstream becomes public again: the
+mirror is unarchived, mirrored normally from then on, and its tombstone row
+gains a `returned` date. The record is kept, not erased; `docs/DELETED.md`
+lists such repositories separately as having come back. A tombstone from a 451
+is never reversed automatically.
+
 ## What we do not mirror
 
 - **Namespaces whose public-body ownership is not established.** The 18

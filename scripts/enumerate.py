@@ -371,6 +371,11 @@ def main():
         # ogcio/govie-ds, whose mirror sat a day stale while the manifest
         # claimed it was current. synced_pushed_at only moves when a sync
         # actually succeeded.
+        elif row.get("status", "").startswith("tombstoned"):
+            # Its mirror is archived, so a push can only fail. If the upstream
+            # is public again, tombstone.py brings it back in the daily run,
+            # and from then on it syncs like any other row.
+            continue
         elif (args.force_all or not row.get("last_synced")
               or pushed > (row.get("synced_pushed_at") or "")):
             changed.append((full_name, row["mirror_name"],
