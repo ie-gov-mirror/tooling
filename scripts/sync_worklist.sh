@@ -12,6 +12,10 @@
 #   4  repo creation throttled   deferred to the next run, not retried here:
 #                                sync_repo.sh has already backed off, and
 #                                trying again at once only extends the limit
+#   5  mirror archived           not retried - an archived repo stays archived
+#                                between attempts - and counted as failed,
+#                                because something archived it outside the
+#                                tombstone flow and a human should look
 #   3  clone failed              retried. The repository was listed by the API
 #                                moments ago, so this is almost always
 #                                transient; real deletions are left to the
@@ -52,7 +56,7 @@ while IFS=$'\t' read -r clone_url mirror_name default_branch tier pushed_at; do
     "$SYNC_REPO" "$clone_url" "$mirror_name" "$default_branch" "$tier" < /dev/null
     rc=$?
     case "$rc" in
-      0|4) break ;;
+      0|4|5) break ;;
     esac
     if [ "$attempt" -lt "$ATTEMPTS" ]; then
       wait=$(( attempt * BACKOFF ))
@@ -67,6 +71,8 @@ while IFS=$'\t' read -r clone_url mirror_name default_branch tier pushed_at; do
        synced=$((synced + 1)) ;;
     4) echo "::warning::$mirror_name deferred - repo creation throttled, next run will retry"
        throttled=$((throttled + 1)) ;;
+    5) echo "::error::$mirror_name: mirror is archived, so it cannot be updated"
+       failed=$((failed + 1)) ;;
     *) echo "::error::$mirror_name failed after $ATTEMPTS attempts (last exit $rc)"
        failed=$((failed + 1)) ;;
   esac

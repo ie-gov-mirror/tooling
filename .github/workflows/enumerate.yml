@@ -45,13 +45,14 @@ jobs:
           scripts/commit_manifest.sh "Update manifest from upstream enumeration" \
             scripts/refresh_manifest.sh || rc=$?
 
-          # 0 = committed. 3 = committed, but a namespace could not be listed.
-          # Either way any newly accepted rows are on the branch now, so
-          # mirror them straight away rather than waiting up to a week for
-          # the scheduled sync.
-          if { [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; } && [ -s accepted.txt ]; then
-            namespaces=$(cut -d/ -f1 accepted.txt | sort -u | xargs)
-            echo "dispatching sync for newly accepted repositories in: $namespaces"
+          # 0 = committed. 3 = committed, but part of the refresh failed.
+          # Either way any newly accepted or returned rows are on the branch
+          # now, so mirror them straight away rather than waiting up to a
+          # week for the scheduled sync.
+          touch accepted.txt returned.txt
+          if { [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; } && { [ -s accepted.txt ] || [ -s returned.txt ]; }; then
+            namespaces=$(cat accepted.txt returned.txt | cut -d/ -f1 | sort -u | xargs)
+            echo "dispatching sync for new or returned repositories in: $namespaces"
             GH_TOKEN="$DISPATCH_TOKEN" gh workflow run sync.yml \
               --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
               -f namespaces="$namespaces"
@@ -63,4 +64,5 @@ jobs:
         run: |
           [ -f drift.txt ] && cat drift.txt >> "$GITHUB_STEP_SUMMARY"
           [ -s accepted.txt ] && { echo; echo "Auto-accepted:"; cat accepted.txt; } >> "$GITHUB_STEP_SUMMARY"
+          [ -s returned.txt ] && { echo; echo "Brought back (public again):"; cat returned.txt; } >> "$GITHUB_STEP_SUMMARY"
           exit 0

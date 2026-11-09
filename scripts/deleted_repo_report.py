@@ -53,11 +53,20 @@ def render(rows):
         ]
         return "\n".join(out)
 
+    # A tombstone with a `returned` date is a disappearance that reversed: the
+    # upstream is public again, so it is listed apart from the ones still gone.
+    back = [r for r in rows if r.get("returned")]
+    rows = [r for r in rows if not r.get("returned")]
     legal = [r for r in rows if str(r.get("http_status")) == "451"]
     normal = [r for r in rows if str(r.get("http_status")) != "451"]
 
-    out.append(f"**{len(rows)} repositories** recorded across "
-               f"{len({r['upstream'].split('/')[0] for r in rows})} namespaces.")
+    if not rows:
+        out += ["## Nothing currently missing", "",
+                "Every tracked repository that disappeared upstream has since "
+                "returned.", ""]
+    else:
+        out.append(f"**{len(rows)} repositories** recorded across "
+                   f"{len({r['upstream'].split('/')[0] for r in rows})} namespaces.")
     out.append("")
 
     by_ns = defaultdict(list)
@@ -90,6 +99,19 @@ def render(rows):
         for r in sorted(legal, key=lambda r: r["upstream"].lower()):
             out.append(f"| `{r['upstream']}` | {r.get('last_seen','')} | "
                        f"{r.get('detected_gone','')} | {r.get('note','')} |")
+        out.append("")
+
+    if back:
+        out.append("## Disappeared, then came back")
+        out.append("")
+        out.append("These were missing upstream for a while and are public "
+                   "again. The mirror kept them throughout.")
+        out.append("")
+        out.append("| Repository | Detected gone | Returned |")
+        out.append("|---|---|---|")
+        for r in sorted(back, key=lambda r: r["upstream"].lower()):
+            out.append(f"| `{r['upstream']}` | {r.get('detected_gone','')} | "
+                       f"{r['returned']} |")
         out.append("")
 
     return "\n".join(out)
